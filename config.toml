@@ -1,0 +1,34 @@
+# MOTIP Configuration
+# This file is read by launcher.py to construct the accelerate launch command.
+
+[system]
+# Options: "train", "submit", "evaluate", "pretrain"
+mode = "train" 
+num_processes = 8
+# Use FP16 for 30% speedup during inference/training
+dtype = "fp16" 
+
+[data]
+# Root folder where your datasets (DanceTrack, SportsMOT, etc.) are stored
+root = "./datasets/"
+# Target dataset name (e.g., DanceTrack, SportsMOT, MOT17)
+dataset = "DanceTrack"
+# Split to use (train, val, test)
+split = "val"
+
+[experiment]
+# The name of the experiment folder created in ./outputs/
+name = "r50_deformable_detr_motip_dancetrack"
+# Path to the model configuration file (YAML) provided by MOTIP
+config_path = "./configs/r50_deformable_detr_motip_dancetrack.yaml"
+
+[checkpoint]
+# Required for "submit" or "evaluate" modes.
+# For "train" mode, this can be used to resume from a checkpoint.
+path = "./outputs/r50_deformable_detr_motip_dancetrack/r50_deformable_detr_motip_dancetrack.pth"
+
+# ---------------------------------------------------------
+# Note:
+# 1. To TRAIN: Set mode="train". Ensure 'config_path' is valid.
+# 2. To EVAL:  Set mode="evaluate", set 'path' to your .pth file.
+# ---------------------------------------------------------
