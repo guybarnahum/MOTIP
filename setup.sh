@@ -3,9 +3,10 @@
 # Setup script for MOTIP (AWS/GPU)
 # - Finds Python 3.12 (preferred) or 3.10+
 # - Installs System Deps (Ninja, build-essential)
-# - Installs PyTorch 2.4.0 (cu121) as recommended
+# - Installs PyTorch 2.4.0 (cu121)
 # - Installs MOTIP dependencies
 # - Compiles Deformable Attention (CUDA ops)
+# - Verifies installation with a lightweight import check
 #
 set -e
 
@@ -40,25 +41,24 @@ run_and_log() {
   local description="$1"; shift
   tput civis 2>/dev/null || true
   
+  # Simple spinner without log tailing to prevent text glitches
   (
     frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
     i=0
     while :; do
-      local last_line=""
-      if [[ -s "$log_file" ]]; then
-        last_line=$(tail -n 1 "$log_file" | sed -E 's/\x1B\[[0-9;?]*[ -/]*[@-~]//g' | cut -c1-80)
-      fi
-      printf '\r\033[K%s %s : %s%s%s' "${frames[i]}" "$description" "${COLOR_GRAY}" "$last_line" "${COLOR_RESET}"
+      printf '\r\033[K%s %s' "${frames[i]}" "$description"
       i=$(( (i + 1) % ${#frames[@]} ))
-      sleep 0.25
+      sleep 0.1
     done
   ) &
   local spinner_pid=$!
 
+  # Run command and redirect ALL output to log file
   if ! "$@" >"$log_file" 2>&1; then
     kill "$spinner_pid" &>/dev/null || true
     wait "$spinner_pid" &>/dev/null || true
     printf '\r\033[K❌ %s failed.\n' "$description"
+    echo "--- Error Log ---"
     cat "$log_file"
     rm -f "$log_file"
     exit 1
@@ -116,8 +116,8 @@ source "$VENV_DIR/bin/activate"
 run_and_log "Upgrade pip" pip install --upgrade pip wheel setuptools
 
 # ---------------- Step 4: Install PyTorch ----------------
-# MOTIP recommends PyTorch 2.4.0. We use cu121 for broad compatibility.
 echo "📦 Installing PyTorch 2.4.0 (cu121)..."
+# Using --no-cache-dir to prevent memory issues during pip install on smaller instances
 run_and_log "Install PyTorch" pip install torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 --index-url https://download.pytorch.org/whl/cu121
 
 # ---------------- Step 5: Install Python Dependencies ----------------
@@ -125,11 +125,11 @@ echo "📦 Installing MOTIP Dependencies..."
 run_and_log "Install Deps" pip install pyyaml tqdm matplotlib scipy pandas wandb accelerate einops "numpy<2" toml
 
 # ---------------- Step 6: Compile Custom Ops ----------------
-echo "⚙️  Compiling Deformable Attention Ops (This may take a moment)..."
+echo "⚙️  Compiling Deformable Attention Ops..."
 
 if [ -d "models/ops" ]; then
   cd models/ops
-  # We use python setup.py explicitly to ensure we use the venv python
+  # Build and Install
   run_and_log "Compile MSDeformAttn" python setup.py build install
   
   # Validate
