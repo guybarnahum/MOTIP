@@ -2,9 +2,9 @@
 #
 # Setup script for MOTIP (AWS/GPU)
 # - Finds Python 3.12 (preferred) or 3.10+
-# - Installs System Deps (Ninja, build-essential)
+# - Installs System Deps (Ninja, build-essential, ffmpeg)
 # - Installs PyTorch 2.4.0 (cu121)
-# - Installs MOTIP dependencies
+# - Installs MOTIP dependencies + opencv
 # - Compiles Deformable Attention (CUDA ops)
 # - Verifies installation with a lightweight import check
 #
@@ -133,9 +133,9 @@ fi
 
 # ---------------- Step 2: System Dependencies ----------------
 if [[ "$(uname -s)" == "Linux" ]]; then
-  if ! command -v ninja &>/dev/null; then
-     # Ninja is crucial for faster/reliable PyTorch builds
-     run_and_log "Install System Deps (ninja, g++)" sudo apt-get update && sudo apt-get install -y ninja-build build-essential g++
+  # Added ffmpeg and libx264-dev for video processing
+  if ! command -v ninja &>/dev/null || ! command -v ffmpeg &>/dev/null; then
+     run_and_log "Install System Deps (ffmpeg, ninja, g++)" sudo apt-get update && sudo apt-get install -y ffmpeg libx264-dev ninja-build build-essential g++
   fi
   
   # Ensure CUDA_HOME is set for compilation
@@ -162,7 +162,8 @@ run_and_log "Install PyTorch" pip install torch==2.4.0 torchvision==0.19.0 torch
 
 # ---------------- Step 5: Install Python Dependencies ----------------
 echo "📦 Installing MOTIP Dependencies..."
-run_and_log "Install Deps" pip install pyyaml tqdm matplotlib scipy pandas wandb accelerate einops "numpy<2" toml
+# Added opencv-python here
+run_and_log "Install Deps" pip install pyyaml tqdm matplotlib scipy pandas wandb accelerate einops "numpy<2" toml opencv-python
 
 # ---------------- Step 6: Compile Custom Ops ----------------
 echo "⚙️  Compiling Deformable Attention Ops..."
