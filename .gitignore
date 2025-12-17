@@ -1,5 +1,47 @@
-# Root gitignore file
+# --- Python & Virtual Environment ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.env
 
-# PyCharm
+# --- IDEs & OS ---
 .idea/
-pretrains/motip_dancetrack.pth
+.vscode/
+*.swp
+.DS_Store
+
+# --- Build Artifacts (C++ / Deformable DETR) ---
+# Essential to ignore these as they are specific to your machine/GPU
+build/
+dist/
+*.egg-info/
+models/ops/build/
+models/ops/dist/
+models/ops/*.so
+*.so
+
+# --- Model Weights & Checkpoints ---
+*.pth
+*.pt
+*.ckpt
+pretrains/
+checkpoints/
+
+# --- Data & Logs ---
+data/
+datasets/
+outputs/
+log/
+logs/
+cache/
+
+# --- Generated Outputs ---
+*.mp4
+*.avi
+output_*.mp4
+dance_result.mp4
+
+# --- Local Scripts (Optional) ---
