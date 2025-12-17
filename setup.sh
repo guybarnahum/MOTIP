@@ -39,34 +39,74 @@ fi
 run_and_log() {
   local log_file; log_file=$(mktemp)
   local description="$1"; shift
+
+  # Hide cursor
   tput civis 2>/dev/null || true
-  
-  # Simple spinner without log tailing to prevent text glitches
+
+  local prev_render=""
+  local cols; cols=$(tput cols 2>/dev/null || echo 120)
+
   (
-    frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+    frames=( '⠋ ' '⠙ ' '⠹ ' '⠸ ' '⠼ ' '⠴ ' '⠦ ' '⠧ ' '⠇ ' '⠏ ' )
     i=0
     while :; do
-      printf '\r\033[K%s %s' "${frames[i]}" "$description"
-      i=$(( (i + 1) % ${#frames[@]} ))
-      sleep 0.1
+      local last_line=""
+      if [[ -s "$log_file" ]]; then
+        # tail the last line, strip ANSI codes, and remove carriage returns that confuse the terminal
+        last_line=$(tail -n 1 "$log_file" | sed -E 's/\x1B\[[0-9;?]*[ -/]*[@-~]//g' | tr -d '\r')
+      fi
+
+      local prefix="${frames[i]}${description} : "
+      
+      # Calculate available space for the log tail
+      local available_space=$((cols - ${#prefix} - 1))
+      if (( available_space < 0 )); then available_space=0; fi
+
+      # Truncate last_line if it's too long
+      if (( ${#last_line} > available_space )); then
+        last_line="${last_line:0:$available_space}"
+      fi
+
+      # Construct the visual string
+      # We construct "head" (white) and "tail" (gray) separately
+      local render="${COLOR_RESET}${prefix}${COLOR_GRAY}${last_line}${COLOR_RESET}"
+
+      # Only print if changed to reduce flicker
+      if [[ "$render" != "$prev_render" ]]; then
+        # \033[K clears the line from cursor to end
+        printf '\r\033[K%s' "$render"
+        prev_render="$render"
+      fi
+
+      i=$(( (i+1) % ${#frames[@]} ))
+      sleep 0.2
     done
   ) &
   local spinner_pid=$!
 
-  # Run command and redirect ALL output to log file
+  # Run the command
   if ! "$@" >"$log_file" 2>&1; then
     kill "$spinner_pid" &>/dev/null || true
     wait "$spinner_pid" &>/dev/null || true
-    printf '\r\033[K❌ %s failed.\n' "$description"
-    echo "--- Error Log ---"
+    # Restore cursor
+    tput cnorm 2>/dev/null || true
+    
+    printf '\r\033[K%s' "${COLOR_RESET}"
+    printf "❌ %s failed.\n" "$description"
+    echo "--- ERROR LOG ---"
     cat "$log_file"
+    echo "--- END LOG ---"
     rm -f "$log_file"
     exit 1
   fi
 
   kill "$spinner_pid" &>/dev/null || true
   wait "$spinner_pid" &>/dev/null || true
-  printf '\r\033[K✅ %s\n' "$description"
+  # Restore cursor
+  tput cnorm 2>/dev/null || true
+
+  printf '\r\033[K%s' "${COLOR_RESET}"
+  printf '✅ %s\n' "$description"
   rm -f "$log_file"
 }
 
