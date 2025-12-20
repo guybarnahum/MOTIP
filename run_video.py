@@ -39,6 +39,10 @@ def get_args():
     parser.add_argument('--device', type=str, default="cuda")
     parser.add_argument('--fp16', action='store_true', default=True, help="Use Float16 precision for speed")
     
+    # Frame Range Options
+    parser.add_argument('--start_frame', type=int, default=0, help="Frame index to start processing from (default: 0)")
+    parser.add_argument('--end_frame', type=int, default=None, help="Frame index to stop at (default: end of video)")
+    
     return parser.parse_args()
 
 def generate_colors(num_colors=1000):
@@ -56,8 +60,6 @@ def convert_to_h264(input_path, output_path):
         return
 
     print("🔄 Converting to H.264 (Seekable + Timecode)...")
-    # -metadata timecode="00:00:00:00": Embeds a timecode track starting at 0
-    # -g 10: Keyframe every 10 frames for smooth scrubbing
     cmd = [
         'ffmpeg', '-y', 
         '-i', input_path, 
@@ -66,7 +68,7 @@ def convert_to_h264(input_path, output_path):
         '-crf', '23', 
         '-g', '10',
         '-pix_fmt', 'yuv420p',
-        '-metadata', 'timecode=00:00:00:00',  # <--- Embeds Timecode Track
+        '-metadata', 'timecode=00:00:00:00',
         output_path
     ]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -117,11 +119,28 @@ def main():
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = cap.get(cv2.CAP_PROP_FPS)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    total_frames_in_video = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     
-    print(f"🎬 Processing: {args.video_path} ({width}x{height} @ {fps:.2f}fps)")
+    # Validate Start/End Frames
+    start_frame = max(0, args.start_frame)
+    if args.end_frame is None or args.end_frame > total_frames_in_video:
+        end_frame = total_frames_in_video
+    else:
+        end_frame = args.end_frame
     
-    # 6. Setup Video Output (Temporary file)
+    process_duration = end_frame - start_frame
+    if process_duration <= 0:
+        print("❌ Error: end_frame must be greater than start_frame")
+        sys.exit(1)
+
+    print(f"🎬 Video: {args.video_path} ({width}x{height} @ {fps:.2f}fps)")
+    print(f"⏱️  Processing Range: Frame {start_frame} to {end_frame} (Total: {process_duration} frames)")
+    
+    # Seek to start frame
+    if start_frame > 0:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+
+    # 6. Setup Video Output
     temp_output = "temp_" + os.path.basename(args.output_path)
     fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
     out = cv2.VideoWriter(temp_output, fourcc, fps, (width, height))
@@ -152,13 +171,14 @@ def main():
         mean = mean.half()
         std = std.half()
 
-    frame_idx = 0
+    frame_idx = start_frame
+    frames_processed = 0
     fps_avg = 0
     start_time = time.time()
 
     # 8. Loop
     try:
-        while cap.isOpened():
+        while cap.isOpened() and frame_idx < end_frame:
             loop_start = time.time()
             ret, frame = cap.read()
             if not ret:
@@ -206,27 +226,31 @@ def main():
                 label = f"ID {obj_id}"
                 cv2.putText(frame, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
-            # Draw Stats (FPS & Frame Number)
+            # Draw Stats
             loop_time = time.time() - loop_start
             if loop_time > 0:
                 fps_inst = 1.0 / loop_time
-                fps_avg = 0.9 * fps_avg + 0.1 * fps_inst if frame_idx > 0 else fps_inst
+                fps_avg = 0.9 * fps_avg + 0.1 * fps_inst if frames_processed > 0 else fps_inst
             
             # Top-Left: FPS
             cv2.putText(frame, f"FPS: {int(fps_avg)}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
             cv2.putText(frame, f"GPU: {gpu_name}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 1)
 
-            # Top-Right: Frame Counter (Visual Burn-in)
+            # Top-Right: Frame Counter
             frame_label = f"Frame: {frame_idx}"
             (tw, th), _ = cv2.getTextSize(frame_label, cv2.FONT_HERSHEY_SIMPLEX, 1, 2)
             cv2.putText(frame, frame_label, (width - tw - 20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
 
             out.write(frame)
             
-            if frame_idx % 20 == 0:
-                print(f"   Frame {frame_idx}/{total_frames} | FPS: {fps_avg:.1f}", end='\r')
+            # Progress Logging
+            if frames_processed % 20 == 0:
+                progress_pct = (frames_processed / process_duration) * 100
+                sys.stdout.write(f"\r   Frame {frame_idx} (Processed {frames_processed}/{process_duration}) | {progress_pct:.1f}% | FPS: {fps_avg:.1f}   ")
+                sys.stdout.flush()
             
             frame_idx += 1
+            frames_processed += 1
 
     except KeyboardInterrupt:
         print("\n🛑 Interrupted by user! Saving video so far...")
@@ -238,10 +262,10 @@ def main():
         cap.release()
         out.release()
         total_time = time.time() - start_time
-        print(f"\n✅ Finished processing {frame_idx} frames.")
+        print(f"\n✅ Finished processing {frames_processed} frames in {total_time:.1f}s.")
         
         # Convert to H.264
-        if os.path.exists(temp_output) and frame_idx > 0:
+        if os.path.exists(temp_output) and frames_processed > 0:
             try:
                 convert_to_h264(temp_output, args.output_path)
                 if os.path.exists(args.output_path):
