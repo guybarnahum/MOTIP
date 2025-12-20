@@ -11,7 +11,6 @@ import torchvision.transforms as T
 # Add root to path so we can import internal modules
 sys.path.append(os.getcwd())
 
-# --- FIX: Remove unused/incorrect import 'util.tool' ---
 from models.motip import build as build_model
 
 # -------------------------------------------------------------------------
@@ -61,14 +60,15 @@ def main():
         cfg = yaml.safe_load(f)
     
     # MOTIP's build function expects the 'cfg' dictionary.
-    # We also inject device/distributed settings if they are missing.
     if 'DEVICE' not in cfg: cfg['DEVICE'] = args.device
     if 'DISTRIBUTED' not in cfg: cfg['DISTRIBUTED'] = False
 
     # 2. Build Model
     print("🏗️  Building model...")
-    # Pass the dictionary 'cfg'
-    model, _, _ = build_model(cfg)
+    # FIX: Robustly handle return values (whether 2 or 3)
+    build_output = build_model(cfg)
+    model = build_output[0] # The first item is always the model
+    
     model.to(device)
     
     # 3. Load Checkpoint
