@@ -5,6 +5,7 @@ import numpy as np
 import os
 import sys
 import yaml
+import time
 from PIL import Image
 import torchvision.transforms as T
 import torch.nn.functional as F
@@ -47,9 +48,17 @@ def generate_colors(num_colors=1000):
 @torch.no_grad()
 def main():
     args = get_args()
-    device = torch.device(args.device)
+    
+    # 1. Setup Device & Print Stats
+    if 'cuda' in args.device and torch.cuda.is_available():
+        device = torch.device(args.device)
+        gpu_name = torch.cuda.get_device_name(device)
+        print(f"✅ Running on GPU: {gpu_name}")
+    else:
+        device = torch.device("cpu")
+        print("⚠️  Running on CPU (Slow!)")
 
-    # 1. Load Configuration
+    # 2. Load Configuration
     print(f"📖 Loading config: {args.config_path}")
     with open(args.config_path, 'r') as f:
         cfg = yaml.safe_load(f)
@@ -57,10 +66,9 @@ def main():
     if 'DEVICE' not in cfg: cfg['DEVICE'] = args.device
     if 'DISTRIBUTED' not in cfg: cfg['DISTRIBUTED'] = False
 
-    # 2. Build Model
+    # 3. Build Model
     print("🏗️  Building model...")
     build_output = build_model(cfg)
-    # Handle return values (robust to 2 or 3 items)
     if isinstance(build_output, tuple):
         model = build_output[0]
     else:
@@ -68,13 +76,19 @@ def main():
     
     model.to(device)
     
-    # 3. Load Checkpoint
+    # Check Precision
+    param_dtype = next(model.parameters()).dtype
+    print(f"📊 Model Precision: {param_dtype} (FP16 if half, FP32 if float)")
+
+    # 4. Load Checkpoint (Fixed Warning)
     print(f"📥 Loading weights: {args.checkpoint}")
-    checkpoint = torch.load(args.checkpoint, map_location='cpu')
+    # Added weights_only=False to silence the FutureWarning
+    checkpoint = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
+    
     state_dict = checkpoint.get('model', checkpoint)
     model.load_state_dict(state_dict, strict=False)
     
-    # 4. Setup Video
+    # 5. Setup Video
     cap = cv2.VideoCapture(args.video_path)
     if not cap.isOpened():
         print(f"❌ Error: Could not open video {args.video_path}")
@@ -85,116 +99,101 @@ def main():
     fps = cap.get(cv2.CAP_PROP_FPS)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     
-    print(f"🎬 Processing: {args.video_path} ({width}x{height} @ {fps}fps)")
+    print(f"🎬 Processing: {args.video_path} ({width}x{height} @ {fps:.2f}fps)")
     
     # Initialize Video Writer
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    # fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    fourcc = cv2.VideoWriter_fourcc(*'avc1')
     out = cv2.VideoWriter(args.output_path, fourcc, fps, (width, height))
     
     colors = generate_colors()
 
-    # 5. Initialize RuntimeTracker
-    # We must resize images to the training size (usually short side 800)
-    # BUT we need to pass the *original* sequence HW to the tracker for normalization logic
-    # The tracker internally handles un-normalization based on this.
-    
-    # Important: RuntimeTracker expects (H, W) tuple
+    # 6. Initialize RuntimeTracker
     tracker = RuntimeTracker(
         model=model,
         sequence_hw=(height, width),
         use_sigmoid=cfg.get("USE_FOCAL_LOSS", False),
         assignment_protocol=cfg.get("ASSIGNMENT_PROTOCOL", "hungarian"),
         miss_tolerance=cfg.get("MISS_TOLERANCE", 30),
-        det_thresh=args.score_thresh, # Override config with arg
+        det_thresh=args.score_thresh,
         newborn_thresh=cfg.get("NEWBORN_THRESH", 0.5),
         id_thresh=cfg.get("ID_THRESH", 0.1),
         area_thresh=cfg.get("AREA_THRESH", 0),
-        dtype=torch.float32 # Use float32 for safety unless you compiled FP16 ops
+        dtype=torch.float32 
     )
 
     frame_idx = 0
-    
-    # Image normalization mean/std
     mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(1, 3, 1, 1)
     std = torch.tensor([0.229, 0.224, 0.225], device=device).view(1, 3, 1, 1)
 
+    # FPS Calculation
+    start_time = time.time()
+    fps_avg = 0
+
     while cap.isOpened():
+        loop_start = time.time()
         ret, frame = cap.read()
         if not ret:
             break
             
         # Preprocess
-        # 1. Convert BGR -> RGB
         img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        
-        # 2. Convert to Tensor (0-255 byte -> 0-1 float)
         img_tensor = torch.from_numpy(img_rgb).to(device).float().permute(2, 0, 1) / 255.0
         
-        # 3. Resize (Short side 800)
-        # We need to maintain aspect ratio.
-        # target_h, target_w = 800, 1333 (max) logic usually handled by transforms
-        # Here we do a simple resize to 800 short side for consistency with training
+        # Resize logic
         h, w = img_tensor.shape[1], img_tensor.shape[2]
         scale = 800 / min(h, w)
         if max(h, w) * scale > 1333:
             scale = 1333 / max(h, w)
         new_h, new_w = int(h * scale), int(w * scale)
-        
         img_resized = F.interpolate(img_tensor.unsqueeze(0), size=(new_h, new_w), mode='bilinear', align_corners=False)
-        
-        # 4. Normalize
         img_norm = (img_resized - mean) / std
         
-        # 5. Forward Pass (using Tracker)
-        # RuntimeTracker.update() expects a NestedTensor or a simple Tensor list
-        # We pass the tensor directly. The model forward handles the rest.
+        # Forward Pass
         tracker.update(img_norm)
         
-        # 6. Get Results
+        # Get Results
         results = tracker.get_track_results()
-        
-        # Results structure:
-        # "bbox": [N, 4] (x1, y1, w, h) absolute pixels
-        # "id": [N] int64
-        # "score": [N] float
-        
         valid_boxes = results['bbox']
         valid_ids = results['id']
         valid_scores = results['score']
         
-        # 7. Visualization
+        # Visualization
         for i in range(len(valid_scores)):
             score = valid_scores[i].item()
             obj_id = int(valid_ids[i].item())
-            
-            # The tracker returns XYWH (TopLeft X, TopLeft Y, W, H)
             x, y, w_box, h_box = valid_boxes[i].cpu().numpy()
             
-            x1 = int(x)
-            y1 = int(y)
-            x2 = int(x + w_box)
-            y2 = int(y + h_box)
-            
-            # Draw
+            x1, y1, x2, y2 = int(x), int(y), int(x + w_box), int(y + h_box)
             color = [int(c) for c in colors[obj_id % 1000]]
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
             
-            # Label
-            label = f"ID {obj_id} ({score:.2f})"
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            label = f"ID {obj_id}"
             (w_text, h_text), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
             cv2.rectangle(frame, (x1, y1 - 20), (x1 + w_text, y1), color, -1)
             cv2.putText(frame, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
+        # Draw FPS
+        loop_time = time.time() - loop_start
+        if loop_time > 0:
+            fps_inst = 1.0 / loop_time
+            fps_avg = 0.9 * fps_avg + 0.1 * fps_inst if frame_idx > 0 else fps_inst
+        
+        cv2.putText(frame, f"FPS: {int(fps_avg)}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        cv2.putText(frame, f"GPU: {torch.cuda.get_device_name(device)}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 1)
+
         out.write(frame)
         
         if frame_idx % 20 == 0:
-            print(f"   Frame {frame_idx}/{total_frames}", end='\r')
+            print(f"   Frame {frame_idx}/{total_frames} | FPS: {fps_avg:.1f}", end='\r')
         
         frame_idx += 1
 
+    total_time = time.time() - start_time
+    print(f"\n✅ Done! Processed {frame_idx} frames in {total_time:.1f}s ({frame_idx/total_time:.1f} FPS avg)")
+    print(f"   Saved to: {args.output_path}")
     cap.release()
     out.release()
-    print(f"\n✅ Done! Video saved to: {args.output_path}")
 
 if __name__ == '__main__':
     main()
