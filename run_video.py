@@ -11,9 +11,8 @@ import torchvision.transforms as T
 # Add root to path so we can import internal modules
 sys.path.append(os.getcwd())
 
-# --- FIX: Correct Import based on your train.py ---
+# --- FIX: Remove unused/incorrect import 'util.tool' ---
 from models.motip import build as build_model
-from util.tool import load_model
 
 # -------------------------------------------------------------------------
 # Configuration & Setup
@@ -61,14 +60,14 @@ def main():
     with open(args.config_path, 'r') as f:
         cfg = yaml.safe_load(f)
     
-    # MOTIP's build function expects the 'cfg' dictionary, not args.
+    # MOTIP's build function expects the 'cfg' dictionary.
     # We also inject device/distributed settings if they are missing.
     if 'DEVICE' not in cfg: cfg['DEVICE'] = args.device
     if 'DISTRIBUTED' not in cfg: cfg['DISTRIBUTED'] = False
 
     # 2. Build Model
     print("🏗️  Building model...")
-    # FIX: Pass the dictionary 'cfg', not 'args'
+    # Pass the dictionary 'cfg'
     model, _, _ = build_model(cfg)
     model.to(device)
     
