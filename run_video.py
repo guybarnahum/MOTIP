@@ -11,7 +11,8 @@ import torchvision.transforms as T
 # Add root to path so we can import internal modules
 sys.path.append(os.getcwd())
 
-from models import build_model
+# --- FIX: Correct Import based on your train.py ---
+from models.motip import build as build_model
 from util.tool import load_model
 
 # -------------------------------------------------------------------------
@@ -30,12 +31,6 @@ def get_args():
     # Runtime Options
     parser.add_argument('--score_thresh', type=float, default=0.5, help="Confidence threshold")
     parser.add_argument('--device', type=str, default="cuda")
-    
-    # Defaults required by MOTIP build_model (prevent crashes if config misses them)
-    parser.add_argument('--masks', action='store_true', default=False)
-    parser.add_argument('--aux_loss', action='store_true', default=True)
-    parser.add_argument('--meta_arch', type=str, default='motip')
-    parser.add_argument('--distributed', action='store_true', default=False)
     
     return parser.parse_args()
 
@@ -61,17 +56,20 @@ def main():
     args = get_args()
     device = torch.device(args.device)
 
-    # 1. Load Configuration (Merge YAML into args)
+    # 1. Load Configuration
     print(f"📖 Loading config: {args.config_path}")
     with open(args.config_path, 'r') as f:
         cfg = yaml.safe_load(f)
     
-    for k, v in cfg.items():
-        setattr(args, k, v)
+    # MOTIP's build function expects the 'cfg' dictionary, not args.
+    # We also inject device/distributed settings if they are missing.
+    if 'DEVICE' not in cfg: cfg['DEVICE'] = args.device
+    if 'DISTRIBUTED' not in cfg: cfg['DISTRIBUTED'] = False
 
     # 2. Build Model
     print("🏗️  Building model...")
-    model, _, _ = build_model(args)
+    # FIX: Pass the dictionary 'cfg', not 'args'
+    model, _, _ = build_model(cfg)
     model.to(device)
     
     # 3. Load Checkpoint
@@ -85,6 +83,10 @@ def main():
 
     # 4. Setup Video
     cap = cv2.VideoCapture(args.video_path)
+    if not cap.isOpened():
+        print(f"❌ Error: Could not open video {args.video_path}")
+        sys.exit(1)
+
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = cap.get(cv2.CAP_PROP_FPS)
