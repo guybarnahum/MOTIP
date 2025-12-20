@@ -10,6 +10,10 @@ import subprocess
 import shutil
 import torchvision.transforms as T
 import torch.nn.functional as F
+import warnings
+
+# --- FIX: Suppress the meshgrid warning ---
+warnings.filterwarnings("ignore", message=".*torch.meshgrid: in an upcoming release.*")
 
 # Add root to path so we can import internal modules
 sys.path.append(os.getcwd())
@@ -43,7 +47,7 @@ def generate_colors(num_colors=1000):
 
 def convert_to_h264(input_path, output_path):
     """
-    Converts a video to H.264 using system ffmpeg for better compatibility and seekability.
+    Converts to H.264 with Timecode Metadata.
     """
     if shutil.which('ffmpeg') is None:
         print("⚠️  FFmpeg not found. Skipping H.264 conversion.")
@@ -51,18 +55,18 @@ def convert_to_h264(input_path, output_path):
             shutil.move(input_path, output_path)
         return
 
-    print("🔄 Converting to H.264 (High Seekability)...")
-    # -crf 23: Good quality
-    # -g 10: Keyframe every 10 frames (Great for frame-by-frame scrubbing)
-    # -bf 2: Use B-frames for compression efficiency
+    print("🔄 Converting to H.264 (Seekable + Timecode)...")
+    # -metadata timecode="00:00:00:00": Embeds a timecode track starting at 0
+    # -g 10: Keyframe every 10 frames for smooth scrubbing
     cmd = [
         'ffmpeg', '-y', 
         '-i', input_path, 
         '-c:v', 'libx264', 
         '-preset', 'fast', 
         '-crf', '23', 
-        '-g', '10',          # <--- FIX: Frequent keyframes for smooth seeking
-        '-pix_fmt', 'yuv420p', 
+        '-g', '10',
+        '-pix_fmt', 'yuv420p',
+        '-metadata', 'timecode=00:00:00:00',  # <--- Embeds Timecode Track
         output_path
     ]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -212,7 +216,7 @@ def main():
             cv2.putText(frame, f"FPS: {int(fps_avg)}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
             cv2.putText(frame, f"GPU: {gpu_name}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 1)
 
-            # Top-Right: Frame Counter (Critical for scrubbing)
+            # Top-Right: Frame Counter (Visual Burn-in)
             frame_label = f"Frame: {frame_idx}"
             (tw, th), _ = cv2.getTextSize(frame_label, cv2.FONT_HERSHEY_SIMPLEX, 1, 2)
             cv2.putText(frame, frame_label, (width - tw - 20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
