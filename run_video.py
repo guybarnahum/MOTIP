@@ -36,6 +36,7 @@ def get_args():
     
     # Runtime Options
     parser.add_argument('--score_thresh', type=float, default=0.5, help="Confidence threshold")
+    parser.add_argument('--miss_tolerance', type=int, default=30, help="Max frames to keep ID alive without detection (default: 30)")
     parser.add_argument('--device', type=str, default="cuda")
     parser.add_argument('--fp16', action='store_true', default=True, help="Use Float16 precision for speed")
     
@@ -150,13 +151,14 @@ def main():
     # 7. Initialize RuntimeTracker
     target_dtype = torch.float16 if args.fp16 else torch.float32
     print(f"📊 Precision: {'FP16 (Half)' if args.fp16 else 'FP32 (Full)'}")
+    print(f"🕵️  Tracking: Miss Tolerance = {args.miss_tolerance} frames")
 
     tracker = RuntimeTracker(
         model=model,
         sequence_hw=(height, width),
         use_sigmoid=cfg.get("USE_FOCAL_LOSS", False),
         assignment_protocol=cfg.get("ASSIGNMENT_PROTOCOL", "hungarian"),
-        miss_tolerance=cfg.get("MISS_TOLERANCE", 30),
+        miss_tolerance=args.miss_tolerance, # Override with CLI arg
         det_thresh=args.score_thresh,
         newborn_thresh=cfg.get("NEWBORN_THRESH", 0.5),
         id_thresh=cfg.get("ID_THRESH", 0.1),
@@ -232,18 +234,15 @@ def main():
                 fps_inst = 1.0 / loop_time
                 fps_avg = 0.9 * fps_avg + 0.1 * fps_inst if frames_processed > 0 else fps_inst
             
-            # Top-Left: FPS
             cv2.putText(frame, f"FPS: {int(fps_avg)}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
             cv2.putText(frame, f"GPU: {gpu_name}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 1)
 
-            # Top-Right: Frame Counter
             frame_label = f"Frame: {frame_idx}"
             (tw, th), _ = cv2.getTextSize(frame_label, cv2.FONT_HERSHEY_SIMPLEX, 1, 2)
             cv2.putText(frame, frame_label, (width - tw - 20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
 
             out.write(frame)
             
-            # Progress Logging
             if frames_processed % 20 == 0:
                 progress_pct = (frames_processed / process_duration) * 100
                 sys.stdout.write(f"\r   Frame {frame_idx} (Processed {frames_processed}/{process_duration}) | {progress_pct:.1f}% | FPS: {fps_avg:.1f}   ")
