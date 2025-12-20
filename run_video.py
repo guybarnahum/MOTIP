@@ -38,7 +38,7 @@ def get_args():
     parser.add_argument('--score_thresh', type=float, default=0.5, help="Confidence threshold")
     parser.add_argument('--miss_tolerance', type=int, default=30, help="Max frames to keep ID alive without detection (default: 30)")
     parser.add_argument('--device', type=str, default="cuda")
-    parser.add_argument('--fp16', action='store_true', default=True, help="Use Float16 precision for speed")
+    parser.add_argument('--fp16', action='store_true', default=False, help="Use Float16 precision for speed")
     
     # Frame Range Options
     parser.add_argument('--start_frame', type=int, default=0, help="Frame index to start processing from (default: 0)")
