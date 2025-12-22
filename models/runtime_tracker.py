@@ -91,6 +91,10 @@ class RuntimeTracker:
     @torch.no_grad()
     def update(self, image):
         detr_out = self.model(frames=image, part="detr")
+
+        # We save the raw output so the external script can grab 'outputs' (embeddings)
+        self.output = detr_out
+
         scores, categories, boxes, output_embeds = self._get_activate_detections(detr_out=detr_out)
         if self.only_detr:
             id_pred_labels = self.num_id_vocabulary * torch.ones(boxes.shape[0], dtype=torch.int64, device=boxes.device)
