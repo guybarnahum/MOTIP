@@ -3,22 +3,39 @@ import torch
 import numpy as np
 import subprocess
 import shutil
+import os
 
 def generate_colors(num_colors=1000):
     np.random.seed(42)
     return np.random.randint(0, 255, size=(num_colors, 3), dtype="uint8")
 
 def convert_to_h264(input_path, output_path):
-    """Ffmpeg conversion helper"""
+    """
+    Converts to H.264 with Timecode Metadata (Restored from original).
+    """
     if shutil.which('ffmpeg') is None:
-        if input_path != output_path: shutil.move(input_path, output_path)
+        print("⚠️  FFmpeg not found. Skipping H.264 conversion.")
+        if input_path != output_path:
+            shutil.move(input_path, output_path)
         return
-    cmd = ['ffmpeg', '-y', '-i', input_path, '-c:v', 'libx264', '-crf', '23', '-pix_fmt', 'yuv420p', output_path]
+
+    print("🔄 Converting to H.264 (Seekable + Timecode)...")
+    cmd = [
+        'ffmpeg', '-y', 
+        '-i', input_path, 
+        '-c:v', 'libx264', 
+        '-preset', 'fast', 
+        '-crf', '23', 
+        '-g', '10',
+        '-pix_fmt', 'yuv420p',
+        '-metadata', 'timecode=00:00:00:00', # <--- RESTORED THIS
+        output_path
+    ]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    print(f"✅ H.264 conversion complete: {output_path}")
 
 def recover_embeddings(tracker, valid_boxes, img_w, img_h, device):
     """
-    The Critical Bridge:
     Matches 'valid' filtered boxes back to the 'raw' model queries 
     to recover the feature embeddings (hs[-1]).
     """
@@ -36,7 +53,6 @@ def recover_embeddings(tracker, valid_boxes, img_w, img_h, device):
     raw_boxes_px = box_cxcywh_to_xyxy(raw_boxes_norm[0] * scale)
     
     # 2. Convert valid boxes (x,y,w,h) -> (x1,y1,x2,y2)
-    # Note: RuntimeTracker output is already un-normalized but in xywh
     valid_boxes_xyxy = valid_boxes.clone()
     valid_boxes_xyxy[:, 2] += valid_boxes_xyxy[:, 0]
     valid_boxes_xyxy[:, 3] += valid_boxes_xyxy[:, 1]
@@ -44,8 +60,7 @@ def recover_embeddings(tracker, valid_boxes, img_w, img_h, device):
     # 3. IoU Match
     iou_matrix = box_iou(valid_boxes_xyxy, raw_boxes_px)
     
-    # 4. Select best match for each valid box
-    # indices shape: [num_valid_boxes]
+    # 4. Select best match
     _, indices = iou_matrix.max(dim=1)
     
     return raw_outputs[0][indices]
