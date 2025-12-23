@@ -180,12 +180,16 @@ def main():
             # 2. Draw Tracks (In-Place)
             annotator.draw_tracks(frame, valid_boxes, final_ids, valid_ids)
             
-            # 3. Draw Dashboard (RETURNS NEW FRAME - CRITICAL FIX)
+            # 3. Draw Dashboard 
+            # Calculate ACTIVE revivals for this specific frame only
+            # Count how many objects have a different final_id than their tracker id
+            current_overrides_count = sum(1 for o, f in zip(valid_ids, final_ids) if o != f)
+
             mem_stats = {
                 "gallery_size": len(memory.storage),
-                "total_revivals": len(memory.id_map)
+                "active_overrides": current_overrides_count 
             }
-            # <--- FIX IS HERE: We re-assign frame
+
             frame = annotator.draw_dashboard(frame, frame_idx, gpu_name, mem_stats)
 
             out.write(frame)
