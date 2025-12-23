@@ -27,35 +27,38 @@ class Annotator:
             else: self.fps_avg = (self.fps_smoothing * self.fps_avg) + ((1 - self.fps_smoothing) * fps_inst)
 
     def draw_dashboard(self, frame, frame_idx, gpu_name, memory_stats):
-        """Draws status bar. Returns NEW frame."""
+        """Draws status bar at the BOTTOM. Returns NEW frame."""
         H, W = frame.shape[:2]
+        bar_h = 40
+        y_start = H - bar_h  # Start of the bar (e.g. 1040 for a 1080p video)
+        text_y = H - 12      # Baseline for text
         
         overlay = frame.copy()
-        cv2.rectangle(overlay, (0, 0), (W, 40), (20, 20, 20), -1)
+        cv2.rectangle(overlay, (0, y_start), (W, H), (20, 20, 20), -1)
         alpha = 0.8
         frame = cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0)
 
         # FPS & GPU
-        cv2.putText(frame, f"FPS: {int(self.fps_avg)}", (15, 28), self.font, 0.7, self.c_cyan, 2)
-        cv2.putText(frame, f"| {gpu_name}", (140, 28), self.font, 0.6, self.c_white, 1)
+        cv2.putText(frame, f"FPS: {int(self.fps_avg)}", (15, text_y), self.font, 0.7, self.c_cyan, 2)
+        cv2.putText(frame, f"| {gpu_name}", (140, text_y), self.font, 0.6, self.c_white, 1)
 
         # Stats
         gal_size = memory_stats.get('gallery_size', 0)
-        active_overrides = memory_stats.get('active_overrides', 0) # Expecting FRAME-LEVEL count now
+        active_overrides = memory_stats.get('active_overrides', 0)
         
         mem_text = f"LTM Gallery: {gal_size}"
         rev_text = f"Overrides: {active_overrides}"
         
-        cv2.putText(frame, mem_text, (W//2 - 150, 28), self.font, 0.6, self.c_white, 1)
+        cv2.putText(frame, mem_text, (W//2 - 150, text_y), self.font, 0.6, self.c_white, 1)
         
         # Highlight Overrides count only if non-zero
         rev_color = self.c_orange if active_overrides > 0 else (150, 150, 150)
-        cv2.putText(frame, rev_text, (W//2 + 50, 28), self.font, 0.6, rev_color, 2)
+        cv2.putText(frame, rev_text, (W//2 + 50, text_y), self.font, 0.6, rev_color, 2)
 
         # Frame Count
         fr_text = f"Frame: {frame_idx}"
         (fw, _), _ = cv2.getTextSize(fr_text, self.font, 0.7, 2)
-        cv2.putText(frame, fr_text, (W - fw - 20, 28), self.font, 0.7, self.c_white, 2)
+        cv2.putText(frame, fr_text, (W - fw - 20, text_y), self.font, 0.7, self.c_white, 2)
         
         return frame
 
@@ -89,7 +92,8 @@ class Annotator:
             
             # Clamp label position so it stays on screen
             lbl_y = y - 10
-            if lbl_y < 45: # Avoid overlapping with dashboard
+            # If box is too high, push label inside or below
+            if lbl_y < 20: 
                 lbl_y = y + 25
 
             # Background Rectangle (Same as box color)
