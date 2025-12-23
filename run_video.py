@@ -11,7 +11,8 @@ import types
 
 # Custom Modules
 from memory_manager import LongTermMemory
-from utils_inference import generate_colors, convert_to_h264, recover_embeddings
+from utils_inference import convert_to_h264, recover_embeddings
+from utils_display import Annotator  # <--- NEW: Import Annotator
 from models.motip import build as build_model
 from models.runtime_tracker import RuntimeTracker
 
@@ -57,7 +58,7 @@ def get_args():
 def main():
     args = get_args()
     
-    # 1. Device Setup (Restored Logic)
+    # 1. Device Setup
     if 'cuda' in args.device and torch.cuda.is_available():
         device = torch.device(args.device)
         gpu_name = torch.cuda.get_device_name(device)
@@ -82,6 +83,7 @@ def main():
 
     # 3. Setup Modules
     memory = LongTermMemory(patience=args.longterm_patience)
+    annotator = Annotator()  # <--- NEW: Initialize Annotator
     
     # 4. Video IO Setup
     cap = cv2.VideoCapture(args.video_path)
@@ -121,7 +123,8 @@ def main():
 
     temp_out = "temp_" + os.path.basename(args.output_path)
     out = cv2.VideoWriter(temp_out, cv2.VideoWriter_fourcc(*'mp4v'), fps, (W, H))
-    colors = generate_colors()
+    
+    # We remove manual color generation here because Annotator handles it internally.
 
     # Image Normalization Stats
     mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(1, 3, 1, 1)
@@ -130,7 +133,6 @@ def main():
 
     frame_idx = start_frame
     frames_processed = 0
-    fps_avg = 0
     start_time = time.time()
     
     try:
@@ -158,50 +160,43 @@ def main():
             
             # --- B. DATA EXTRACTION ---
             res = tracker.get_track_results()
-            valid_boxes = res['bbox']
-            valid_ids = res['id']
+            valid_boxes = res['bbox'].cpu().float().numpy() # [N, 4]
+            valid_ids = res['id'].tolist()                  # [N]
             
-            active_embeds = recover_embeddings(tracker, valid_boxes, W, H, device)
+            active_embeds = recover_embeddings(tracker, res['bbox'], W, H, device)
 
             # --- C. MEMORY UPDATE ---
-            mapped_ids = []
+            final_ids = []
             if active_embeds is not None:
-                id_map = memory.update(frame_idx, valid_ids.tolist(), active_embeds)
-                mapped_ids = [id_map.get(vid, vid) for vid in valid_ids.tolist()]
+                id_map = memory.update(frame_idx, valid_ids, active_embeds)
+                # Map the IDs: If map exists use it, else use original ID
+                final_ids = [id_map.get(vid, vid) for vid in valid_ids]
             else:
-                mapped_ids = valid_ids.tolist()
+                final_ids = valid_ids
 
-            # --- D. DRAWING ---
-            for i, obj_id in enumerate(mapped_ids):
-                x, y, wb, hb = valid_boxes[i].cpu().float().numpy()
-                x1, y1, x2, y2 = int(x), int(y), int(x+wb), int(y+hb)
-                color = [int(c) for c in colors[int(obj_id) % 1000]]
-                
-                # Box & Label
-                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                label = f"ID {obj_id}"
-                cv2.putText(frame, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-
-            # --- E. OSD & STATS (Restored) ---
-            loop_time = time.time() - loop_start
-            if loop_time > 0:
-                fps_inst = 1.0 / loop_time
-                fps_avg = 0.9 * fps_avg + 0.1 * fps_inst if frames_processed > 0 else fps_inst
+            # --- D. ANNOTATION (Delegated to utils_display) ---
             
-            # Draw Stats on Frame
-            cv2.putText(frame, f"FPS: {int(fps_avg)}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-            cv2.putText(frame, f"GPU: {gpu_name}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 1)
-
-            frame_label = f"Frame: {frame_idx}"
-            (tw, th), _ = cv2.getTextSize(frame_label, cv2.FONT_HERSHEY_SIMPLEX, 1, 2)
-            cv2.putText(frame, frame_label, (W - tw - 20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+            # 1. Update Annotator FPS
+            loop_time = time.time() - loop_start
+            annotator.update_fps(loop_time)
+            
+            # 2. Draw Tracks (Annotator handles "Revival" visuals)
+            annotator.draw_tracks(frame, valid_boxes, final_ids, valid_ids)
+            
+            # 3. Draw Dashboard (With Mem stats & OSD)
+            mem_stats = {
+                "gallery_size": len(memory.storage),
+                "total_revivals": len(memory.id_map)
+            }
+            annotator.draw_dashboard(frame, frame_idx, gpu_name, mem_stats)
 
             out.write(frame)
             
-            # Progress Bar (Restored)
+            # Progress Bar (Restored Logic)
             if frames_processed % 20 == 0:
                 progress_pct = (frames_processed / process_duration) * 100
-                sys.stdout.write(f"\r   Frame {frame_idx} (Processed {frames_processed}/{process_duration}) | {progress_pct:.1f}% | FPS: {fps_avg:.1f}   ")
+                fps_val = annotator.fps_avg
+                sys.stdout.write(f"\r   Frame {frame_idx} (Processed {frames_processed}/{process_duration}) | {progress_pct:.1f}% | FPS: {fps_val:.1f}   ")
                 sys.stdout.flush()
 
             frame_idx += 1
