@@ -8,9 +8,12 @@ class Annotator:
         self.colors = self._generate_colors()
         self.font = cv2.FONT_HERSHEY_SIMPLEX
         
-        # Dashboard settings
-        self.dash_h = 120
-        self.dash_color = (40, 40, 40) # Dark gray background
+        # UI Colors (BGR)
+        self.c_white = (255, 255, 255)
+        self.c_black = (0, 0, 0)
+        self.c_cyan = (255, 255, 0)    # High vis text
+        self.c_orange = (0, 165, 255)  # Revival background
+        self.c_red = (0, 0, 255)       # Alert background
 
     def _generate_colors(self, num=1000):
         np.random.seed(42)
@@ -29,40 +32,51 @@ class Annotator:
     def draw_dashboard(self, frame, frame_idx, gpu_name, memory_stats):
         """
         Draws a status bar at the top of the frame.
-        memory_stats: dict with keys like 'active_tracks', 'gallery_size', 'revivals'
+        IMPORTANT: This returns a NEW frame, so you must capture it.
         """
         H, W = frame.shape[:2]
         
-        # Semi-transparent top bar
+        # 1. Create Dashboard Overlay
         overlay = frame.copy()
-        cv2.rectangle(overlay, (0, 0), (W, 40), (0, 0, 0), -1)
-        alpha = 0.6
+        # Draw dark background bar (top 40 pixels)
+        cv2.rectangle(overlay, (0, 0), (W, 40), (20, 20, 20), -1)
+        
+        # Blend overlay (0.7 opacity for background)
+        alpha = 0.7
         frame = cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0)
 
-        # Left: FPS & GPU
+        # 2. Draw Stats (White/Cyan text)
+        # Left: FPS
         fps_text = f"FPS: {int(self.fps_avg)}"
-        cv2.putText(frame, fps_text, (10, 28), self.font, 0.7, (0, 255, 0), 2)
+        cv2.putText(frame, fps_text, (15, 28), self.font, 0.7, self.c_cyan, 2)
         
-        gpu_text = f"GPU: {gpu_name}"
-        cv2.putText(frame, gpu_text, (130, 28), self.font, 0.6, (200, 200, 200), 1)
+        # Left-Center: GPU
+        cv2.putText(frame, f"| {gpu_name}", (140, 28), self.font, 0.6, self.c_white, 1)
 
         # Center: Memory Stats
-        mem_text = f"Mem Bank: {memory_stats.get('gallery_size', 0)} IDs | Revived: {memory_stats.get('total_revivals', 0)}"
-        (mw, _), _ = cv2.getTextSize(mem_text, self.font, 0.6, 1)
-        cv2.putText(frame, mem_text, (W//2 - mw//2, 28), self.font, 0.6, (100, 255, 255), 1)
+        gal_size = memory_stats.get('gallery_size', 0)
+        revivals = memory_stats.get('total_revivals', 0)
+        
+        mem_text = f"Memory Bank: {gal_size} IDs"
+        rev_text = f"Revivals: {revivals}"
+        
+        # Draw Memory stats
+        cv2.putText(frame, mem_text, (W//2 - 150, 28), self.font, 0.6, self.c_white, 1)
+        # Highlight Revivals in Orange if > 0
+        rev_color = self.c_orange if revivals > 0 else self.c_white
+        cv2.putText(frame, rev_text, (W//2 + 80, 28), self.font, 0.6, rev_color, 2)
 
         # Right: Frame Count
         fr_text = f"Frame: {frame_idx}"
         (fw, _), _ = cv2.getTextSize(fr_text, self.font, 0.7, 2)
-        cv2.putText(frame, fr_text, (W - fw - 10, 28), self.font, 0.7, (0, 255, 255), 2)
+        cv2.putText(frame, fr_text, (W - fw - 20, 28), self.font, 0.7, self.c_white, 2)
         
         return frame
 
     def draw_tracks(self, frame, boxes, final_ids, original_ids=None):
         """
-        boxes: [N, 4] (x, y, w, h)
-        final_ids: [N] (The ID after memory override)
-        original_ids: [N] (The ID the tracker originally assigned, optional)
+        Draws bounding boxes and ID labels.
+        Modifies 'frame' in-place.
         """
         if original_ids is None:
             original_ids = final_ids
@@ -76,24 +90,33 @@ class Annotator:
             # 1. Main Box
             cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
             
-            # 2. Label Background
+            # 2. Prepare Label
             label = f"ID {obj_id}"
             (tw, th), _ = cv2.getTextSize(label, self.font, 0.6, 2)
             
-            # If this was a MEMORY OVERRIDE (Revival)
+            # --- REVIVAL LOGIC ---
             if obj_id != orig_id:
-                # Draw a special "Revival" tag
-                revival_msg = f"Was {orig_id}"
-                # Yellow background for emphasis
-                cv2.rectangle(frame, (x, y - 40), (x + tw + 10, y), (0, 255, 255), -1) 
-                cv2.putText(frame, "REVIVED", (x, y - 25), self.font, 0.5, (0, 0, 0), 1)
-                cv2.putText(frame, label, (x, y - 5), self.font, 0.6, (0, 0, 0), 2)
+                # This is a Revival! Draw distinctive tag.
+                rev_msg = "REVIVED"
+                (rw, rh), _ = cv2.getTextSize(rev_msg, self.font, 0.5, 1)
                 
-                # Draw a "Flash" or border effect (optional)
-                cv2.rectangle(frame, (x-2, y-2), (x+w+2, y+h+2), (0, 255, 255), 1)
+                # Draw "Revived" tag on top
+                # Background: Orange
+                cv2.rectangle(frame, (x, y - 45), (x + max(tw, rw) + 10, y), self.c_orange, -1)
+                
+                # Text: White
+                cv2.putText(frame, rev_msg, (x + 5, y - 30), self.font, 0.5, self.c_white, 1)
+                cv2.putText(frame, f"ID {obj_id}", (x + 5, y - 8), self.font, 0.6, self.c_white, 2)
+                
+                # Draw connecting line to show it changed
+                # (Optional visual cue: small circle at top-left corner)
+                cv2.circle(frame, (x, y), 4, self.c_orange, -1)
+                
             else:
-                # Standard Label
-                cv2.rectangle(frame, (x, y - 20), (x + tw, y), color, -1)
-                cv2.putText(frame, label, (x, y - 5), self.font, 0.6, (255, 255, 255), 2)
+                # Standard ID Tag
+                # Background: Track Color
+                cv2.rectangle(frame, (x, y - 25), (x + tw + 10, y), color, -1)
+                # Text: White (better contrast on colored backgrounds)
+                cv2.putText(frame, label, (x + 5, y - 8), self.font, 0.6, self.c_white, 2)
 
         return frame

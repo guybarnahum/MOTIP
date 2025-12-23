@@ -124,8 +124,6 @@ def main():
     temp_out = "temp_" + os.path.basename(args.output_path)
     out = cv2.VideoWriter(temp_out, cv2.VideoWriter_fourcc(*'mp4v'), fps, (W, H))
     
-    # We remove manual color generation here because Annotator handles it internally.
-
     # Image Normalization Stats
     mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(1, 3, 1, 1)
     std = torch.tensor([0.229, 0.224, 0.225], device=device).view(1, 3, 1, 1)
@@ -174,25 +172,25 @@ def main():
             else:
                 final_ids = valid_ids
 
-            # --- D. ANNOTATION (Delegated to utils_display) ---
-            
-            # 1. Update Annotator FPS
+            # --- D. ANNOTATION ---
+            # 1. Update FPS
             loop_time = time.time() - loop_start
             annotator.update_fps(loop_time)
             
-            # 2. Draw Tracks (Annotator handles "Revival" visuals)
+            # 2. Draw Tracks (In-Place)
             annotator.draw_tracks(frame, valid_boxes, final_ids, valid_ids)
             
-            # 3. Draw Dashboard (With Mem stats & OSD)
+            # 3. Draw Dashboard (RETURNS NEW FRAME - CRITICAL FIX)
             mem_stats = {
                 "gallery_size": len(memory.storage),
                 "total_revivals": len(memory.id_map)
             }
-            annotator.draw_dashboard(frame, frame_idx, gpu_name, mem_stats)
+            # <--- FIX IS HERE: We re-assign frame
+            frame = annotator.draw_dashboard(frame, frame_idx, gpu_name, mem_stats)
 
             out.write(frame)
             
-            # Progress Bar (Restored Logic)
+            # Progress Bar
             if frames_processed % 20 == 0:
                 progress_pct = (frames_processed / process_duration) * 100
                 fps_val = annotator.fps_avg
