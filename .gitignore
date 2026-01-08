@@ -45,3 +45,4 @@ output_*.mp4
 dance_result.mp4
 
 # --- Local Scripts (Optional) ---
+*.log
