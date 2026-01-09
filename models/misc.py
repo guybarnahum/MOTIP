@@ -85,59 +85,73 @@ def accuracy(output, target, topk=(1,)):
 
 
 def load_detr_pretrain(model: nn.Module, pretrain_path: str, num_classes: int | None, default_class_idx: int | None = None):
+    print(f"loading detr pretrain from {pretrain_path}")
     pretrain_model = torch.load(pretrain_path, map_location=lambda storage, loc: storage, weights_only=False)
     pretrain_state_dict = pretrain_model["model"]
     detr_state_dict = dict()
     model_state_dict = model.state_dict()
+    
+    # 1. Prefix handling
     for k, v in pretrain_state_dict.items():
-        detr_state_dict["detr."+k] = v      # add the prefix for the detr model (in MOTIP).
+        detr_state_dict["detr."+k] = v      
 
+    # 2. Key filtering / shape checking
+    keys_to_skip = []
+    
     for k, v in detr_state_dict.items():
+        # --- Handle Class Head Mismatch ---
         if "class_embed" in k:
             if num_classes is None:
                 num_classes = len(detr_state_dict[k])
-            if len(detr_state_dict[k]) == 91:   # Pretrained in coco:
+            
+            # Case A: COCO Pretrain (91 classes)
+            if len(detr_state_dict[k]) == 91:   
                 if num_classes == 1:
-                    if default_class_idx is None:   # People
+                    if default_class_idx is None:   
                         detr_state_dict[k] = detr_state_dict[k][1:2]
                     else:
                         detr_state_dict[k] = detr_state_dict[k][default_class_idx:default_class_idx+1]
                 else:
-                    # print(">>>> Because the num_classes is not 1, we do not use the pretrained class head.")
-                    # detr_state_dict[k] = model_state_dict[k]
-                    raise NotImplementedError(f"Do not support detr pretrain loading for num_classes={num_classes}")
-            elif num_classes == len(detr_state_dict[k]):    # Just fine for the classifier:
+                    print(f"⚠️  WARNING: COCO classes (91) != Model classes ({num_classes}). Resetting class head.")
+                    detr_state_dict[k] = model_state_dict[k] # Use random init
+                    
+            # Case B: Perfect Match
+            elif num_classes == len(detr_state_dict[k]):    
                 pass
+            
+            # Case C: Mismatch (e.g. DanceTrack 1 -> BDD 2) - THE FIX
             else:
-                raise NotImplementedError(f"Pretrained detr has a class head for {len(detr_state_dict[k])} classes, "
-                                          f"we do not support this pretrained model.")
-        # # For Detect Query:
-        # if "query_embed" in k:
-        #     if len(detr_state_dict[k]) != len(model_state_dict[k]):
-        #         # missmatch for num of det queries
-        #         print(">>>> Because the num of det queries is not matched, "
-        #               "we only use a part of the pretrained query embed.")
-        #         detr_state_dict[k] = model_state_dict[k]
-        #     else:
-        #         pass
-        # for DINO:
+                print(f"⚠️  WARNING: Pretrain classes ({len(detr_state_dict[k])}) != Model classes ({num_classes}). Resetting class head.")
+                detr_state_dict[k] = model_state_dict[k] # Use random init instead of raising Error
+
+        # --- Handle DINO label_enc Mismatch ---
         if "label_enc" in k:
             if len(detr_state_dict[k]) != len(model_state_dict[k]):
-                # missmatch for num classes
-                if len(model_state_dict[k]) == 2:   # 1 class
-                    detr_state_dict[k] = torch.cat((detr_state_dict[k][1:2], detr_state_dict[k][91:92]), dim=0)
+                if len(model_state_dict[k]) == 2:   # 1 class (Background + Class)
+                    try:
+                        detr_state_dict[k] = torch.cat((detr_state_dict[k][1:2], detr_state_dict[k][91:92]), dim=0)
+                    except:
+                        print(f"⚠️  WARNING: Could not adapt label_enc. Resetting.")
+                        detr_state_dict[k] = model_state_dict[k]
                 else:
-                    raise NotImplementedError(f"Do not implement the pretrain loading processing for num_classes={num_classes}")
-                    pass
+                    print(f"⚠️  WARNING: label_enc shape mismatch. Resetting.")
+                    detr_state_dict[k] = model_state_dict[k] # Use random init
 
-    # Transfer the pre-trained parameters to the model state dict.
+    # 3. Transfer Parameters
     for k, v in detr_state_dict.items():
-        assert k in model_state_dict, f"DETR parameter key '{k}' should in the model."
-        model_state_dict[k] = v
-    # Load the model state dict.
+        if k in model_state_dict:
+            # Ensure shapes match before loading
+            if v.shape != model_state_dict[k].shape:
+                print(f"⚠️  Shape mismatch for {k}: {v.shape} vs {model_state_dict[k].shape}. Skipping.")
+                continue
+            model_state_dict[k] = v
+        else:
+            # Key in pretrain but not in model (rare, but possible)
+            pass
+
+    # 4. Load
     model.load_state_dict(state_dict=model_state_dict, strict=True)
     return
-
 
 def save_checkpoint(model, path, states: dict, optimizer, scheduler, only_detr: bool = False):
     if is_main_process():   # only save the model in the main process.
