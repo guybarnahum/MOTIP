@@ -91,20 +91,26 @@ def load_detr_pretrain(model: nn.Module, pretrain_path: str, num_classes: int | 
     detr_state_dict = dict()
     model_state_dict = model.state_dict()
     
-    # 1. Prefix handling
-    for k, v in pretrain_state_dict.items():
-        detr_state_dict["detr."+k] = v      
+    # --- 1. Robust Prefix Handling (Fixes the KeyError) ---
+    # Check if the local model uses 'detr.' prefix
+    has_detr_prefix = any(k.startswith("detr.") for k in model_state_dict.keys())
 
-    # 2. Key filtering / shape checking
-    keys_to_skip = []
-    
+    for k, v in pretrain_state_dict.items():
+        # If model wants 'detr.' but checkpoint doesn't have it, add it.
+        # If checkpoint already has it, leave it alone.
+        if has_detr_prefix and not k.startswith("detr."):
+            new_key = "detr." + k
+        else:
+            new_key = k
+        detr_state_dict[new_key] = v
+
+    # --- 2. Shape Mismatch Handling ---
     for k, v in detr_state_dict.items():
-        # --- Handle Class Head Mismatch ---
         if "class_embed" in k:
             if num_classes is None:
                 num_classes = len(detr_state_dict[k])
             
-            # Case A: COCO Pretrain (91 classes)
+            # Case A: COCO (91 classes)
             if len(detr_state_dict[k]) == 91:   
                 if num_classes == 1:
                     if default_class_idx is None:   
@@ -112,45 +118,46 @@ def load_detr_pretrain(model: nn.Module, pretrain_path: str, num_classes: int | 
                     else:
                         detr_state_dict[k] = detr_state_dict[k][default_class_idx:default_class_idx+1]
                 else:
-                    print(f"⚠️  WARNING: COCO classes (91) != Model classes ({num_classes}). Resetting class head.")
-                    detr_state_dict[k] = model_state_dict[k] # Use random init
+                    print(f"⚠️  WARNING: COCO classes (91) != Model classes ({num_classes}). Resetting {k}.")
+                    if k in model_state_dict:
+                        detr_state_dict[k] = model_state_dict[k]
                     
             # Case B: Perfect Match
             elif num_classes == len(detr_state_dict[k]):    
                 pass
             
-            # Case C: Mismatch (e.g. DanceTrack 1 -> BDD 2) - THE FIX
+            # Case C: Mismatch (DanceTrack 1 -> BDD 2)
             else:
-                print(f"⚠️  WARNING: Pretrain classes ({len(detr_state_dict[k])}) != Model classes ({num_classes}). Resetting class head.")
-                detr_state_dict[k] = model_state_dict[k] # Use random init instead of raising Error
+                print(f"⚠️  WARNING: Pretrain classes ({len(detr_state_dict[k])}) != Model classes ({num_classes}). Resetting {k}.")
+                if k in model_state_dict:
+                    detr_state_dict[k] = model_state_dict[k]
+                else:
+                    print(f"   ❌ Could not find {k} in model to reset it. Skipping.")
 
-        # --- Handle DINO label_enc Mismatch ---
+        # Handle DINO label_enc Mismatch
         if "label_enc" in k:
-            if len(detr_state_dict[k]) != len(model_state_dict[k]):
-                if len(model_state_dict[k]) == 2:   # 1 class (Background + Class)
+            if k in model_state_dict and len(detr_state_dict[k]) != len(model_state_dict[k]):
+                if len(model_state_dict[k]) == 2:
                     try:
                         detr_state_dict[k] = torch.cat((detr_state_dict[k][1:2], detr_state_dict[k][91:92]), dim=0)
                     except:
-                        print(f"⚠️  WARNING: Could not adapt label_enc. Resetting.")
-                        detr_state_dict[k] = model_state_dict[k]
+                         detr_state_dict[k] = model_state_dict[k]
                 else:
-                    print(f"⚠️  WARNING: label_enc shape mismatch. Resetting.")
-                    detr_state_dict[k] = model_state_dict[k] # Use random init
+                    detr_state_dict[k] = model_state_dict[k]
 
-    # 3. Transfer Parameters
+    # --- 3. Final Load ---
+    # Filter out keys that don't exist in the model (just in case)
+    final_state_dict = {}
     for k, v in detr_state_dict.items():
         if k in model_state_dict:
-            # Ensure shapes match before loading
+            # Final shape check to prevent crashing
             if v.shape != model_state_dict[k].shape:
-                print(f"⚠️  Shape mismatch for {k}: {v.shape} vs {model_state_dict[k].shape}. Skipping.")
-                continue
-            model_state_dict[k] = v
-        else:
-            # Key in pretrain but not in model (rare, but possible)
-            pass
-
-    # 4. Load
-    model.load_state_dict(state_dict=model_state_dict, strict=True)
+                print(f"⚠️  Final shape mismatch for {k}: {v.shape} vs {model_state_dict[k].shape}. Resetting to random.")
+                final_state_dict[k] = model_state_dict[k]
+            else:
+                final_state_dict[k] = v
+        
+    model.load_state_dict(state_dict=final_state_dict, strict=False)
     return
 
 def save_checkpoint(model, path, states: dict, optimizer, scheduler, only_detr: bool = False):
