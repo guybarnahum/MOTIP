@@ -38,7 +38,8 @@ if [ $? -eq 0 ]; then
 fi
 
 # --- 4. Build Command (Auto-Resume Logic) ---
-BASE_CMD="accelerate launch --num_processes=1 train.py --config-path $CONFIG_PATH --exp-name $EXP_NAME"
+# Added PYTORCH_CUDA_ALLOC_CONF before the command
+BASE_CMD="PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True accelerate launch --mixed_precision=fp16 --num_processes=1 train.py --config-path $CONFIG_PATH --exp-name $EXP_NAME"
 FINAL_CMD=""
 
 if [ -f "${OUTPUT_DIR}/checkpoint.pth" ]; then
