@@ -438,6 +438,7 @@ def train_one_epoch(
                 detr_loss_dict[k] * detr_weight_dict[k] for k in detr_loss_dict.keys() if k in detr_weight_dict
             )
             loss = detr_loss + (id_loss if id_loss is not None else 0) * id_criterion.weight
+            
             # Logging losses:
             metrics.update(name="loss", value=loss.item())
             metrics.update(name="detr_loss", value=detr_loss.item())
@@ -445,29 +446,31 @@ def train_one_epoch(
                 metrics.update(name="id_loss", value=id_loss.item())
             for k, v in detr_loss_dict.items():
                 metrics.update(name=k, value=v.item())
+            
             loss /= accumulate_steps
-            accelerator.backward(loss)  # use this line to replace loss.backward()
+            accelerator.backward(loss) 
+
             if (step + 1) % accumulate_steps == 0:
-                if use_accelerate_clip_norm:
-                    if separate_clip_norm:
-                        detr_grad_norm = accelerator.clip_grad_norm_(detr_params, max_norm=max_clip_norm)
-                        other_grad_norm = accelerator.clip_grad_norm_(other_params, max_norm=max_clip_norm)
-                    else:
-                        detr_grad_norm = other_grad_norm = accelerator.clip_grad_norm_(model.parameters(), max_norm=max_clip_norm)
+                # --- PATCH START ---
+                # Fix: Explicitly unscale once, then use standard PyTorch clipping.
+                # This avoids the "double unscale" error from calling accelerator.clip_grad_norm_ twice.
+                accelerator.unscale_gradients()
+                
+                if separate_clip_norm:
+                    detr_grad_norm = torch.nn.utils.clip_grad_norm_(detr_params, max_clip_norm)
+                    other_grad_norm = torch.nn.utils.clip_grad_norm_(other_params, max_clip_norm)
                 else:
-                    if separate_clip_norm:
-                        accelerator.unscale_gradients()
-                        detr_grad_norm = torch.nn.utils.clip_grad_norm_(detr_params, max_clip_norm)
-                        other_grad_norm = torch.nn.utils.clip_grad_norm_(other_params, max_clip_norm)
-                    else:
-                        accelerator.unscale_gradients()
-                        detr_grad_norm = other_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_clip_norm)
+                    # Clip all parameters together
+                    detr_grad_norm = other_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_clip_norm)
+                # --- PATCH END ---
+
                 # Hack implementation to log grad_norm
                 metrics.update(name="detr_grad_norm", value=detr_grad_norm.item())
                 metrics.update(name="other_grad_norm", value=other_grad_norm.item())
+                
                 optimizer.step()
                 optimizer.zero_grad()
-
+                
         # Logging:
         tps.update(tps=tps.timestamp() - step_timestamp)
         step_timestamp = tps.timestamp()
