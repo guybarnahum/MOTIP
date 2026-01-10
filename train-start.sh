@@ -17,7 +17,7 @@ EXP_NAME="${FILENAME%.*}"
 
 # Create a unique session name (e.g., "motip_bdd_mini")
 SESSION_NAME="motip_${EXP_NAME}"
-OUTPUT_DIR="output/${EXP_NAME}"
+OUTPUT_DIR="outputs/${EXP_NAME}"
 LOG_FILE="${OUTPUT_DIR}/train.log"
 
 # Create output dir if it doesn't exist (for the log file)
