@@ -29,6 +29,11 @@ BATCH_SIZE: 1
 ACCUMULATE_STEPS: 1
 NUM_WORKERS: 4
 
+# Global flag to enable aggressive memory saving techniques
+# Set to True for 24GB cards. Set to False for 48GB+ cards.
+MEMORY_EFFICIENT: True
+USE_DECODER_CHECKPOINT: True
+
 # 6. Output
 OUTPUT_DIR: output/bdd_mini_dt_pretrain
 

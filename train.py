@@ -187,6 +187,7 @@ def train_engine(config: dict):
             outputs_dir=outputs_dir,
             is_last_epochs=(epoch == config["EPOCHS"] - 1),
             multi_last_checkpoints=config["MULTI_LAST_CHECKPOINTS"],
+            memory_efficient=config.get("MEMORY_EFFICIENT",False),
         )
 
         # Get learning rate:
@@ -284,6 +285,7 @@ def train_one_epoch(
         outputs_dir: str = None,
         is_last_epochs: bool = False,
         multi_last_checkpoints: int = 0,
+        memory_efficient: bool = False,
 ):
     current_last_checkpoint_idx = 0
 
@@ -309,7 +311,8 @@ def train_one_epoch(
     for step, samples in enumerate(dataloader):
 
         try:
-            torch.cuda.empty_cache()
+            if memory_efficient:
+                torch.cuda.empty_cache()
             
             images, annotations, metas = samples["images"], samples["annotations"], samples["metas"]
             # Normalize the images:
