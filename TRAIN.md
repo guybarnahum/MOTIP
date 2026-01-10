@@ -6,20 +6,23 @@ This document outlines the 4-stage transfer learning strategy to train MOTIP fro
 
 ## 📋 Overview
 
+Times are on EC2 g5.2xlarge / Nvidia A10G / 24 GB GPU:
+
 | Phase | Stage | Dataset | Size (Videos) | Est. Time | Goal | Base Weights |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **I** | **1. BDD-Foundation** | BDD100k | ~80 | 300 min | Learn basic road classes | `motip_dancetrack.pth` |
-| **I** | **2. BDD-Refinement** | BDD100k | ~150 | 300 min | Robustness & Convergence | `output/bdd_stage1` |
-| **II** | **3. Vis-Adaptation** | VisDrone | ~80 | 300 min | Domain Transfer (Ground → Air) | `output/bdd_stage2` |
-| **II** | **4. Vis-Specialist** | VisDrone | ~150 | 300 min | Aerial Crowds & Tiny Objects | `output/visdrone_stage1` |
+| **I** | **BDD-Foundation** | BDD100k | ~80 | 300 min | Learn basic road classes | `motip_dancetrack.pth` |
+| **I** | **BDD-Refinement** | BDD100k | ~150 | 300 min | Robustness & Convergence | `output/bdd_stage1` |
+| **II** | **Vis-Adaptation** | VisDrone | ~80 | 300 min | Domain Transfer (Ground → Air) | `output/bdd_stage2` |
+| **II** | **Vis-Specialist** | VisDrone | ~150 | 300 min | Aerial Crowds & Tiny Objects | `output/visdrone_stage1` |
 
 ---
 
 ## 🛠️ Prerequisites
 
+There are important Memory optimizations in train.py that must be included for traning to work on 24GB cards, the original repro did not have them:
+
 1.  **OOM Protection**: Ensure `train.py` has the OOM `try...except` block installed.
 2.  **Memory Flag**: Ensure `train.py` reads `MEMORY_EFFICIENT` from config.
-3.  **Builder**: Ensure `builder.py` is configured to generate the correct dataset sizes.
 
 ---
 
