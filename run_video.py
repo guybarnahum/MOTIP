@@ -69,7 +69,21 @@ def main():
         print("⚠️  Running on CPU (Slow!)")
 
     # 2. Setup Model
-    with open(args.config_path, 'r') as f: cfg = yaml.safe_load(f)
+    with open(args.config_path, 'r') as f:
+        cfg = yaml.safe_load(f)
+
+    # Check for inheritance and merge
+    if "SUPER_CONFIG_PATH" in cfg:
+        print(f"🔗 Inheriting config from: {cfg['SUPER_CONFIG_PATH']}")
+        with open(cfg["SUPER_CONFIG_PATH"], 'r') as f_base:
+            base_cfg = yaml.safe_load(f_base)
+        
+        # Merge: Base config + Child config (Child overwrites Base)
+        # Note: This is a shallow merge. For deep merging, you might need a custom function,
+        # but for simple MOTIP configs, this update() is usually sufficient.
+        base_cfg.update(cfg) 
+        cfg = base_cfg
+
     if 'DEVICE' not in cfg: cfg['DEVICE'] = args.device
     
     print("🏗️  Building model...")
