@@ -307,220 +307,242 @@ def train_one_epoch(
             other_params.append(param)
 
     for step, samples in enumerate(dataloader):
-        images, annotations, metas = samples["images"], samples["annotations"], samples["metas"]
-        # Normalize the images:
-        # (Normally, it should be done in the dataloader, but here we do it in the training loop (on cuda).)
-        mean = [0.485, 0.456, 0.406]
-        std = [0.229, 0.224, 0.225]
-        images.tensors = v2.functional.to_dtype(images.tensors, dtype=torch.float32, scale=True)
-        images.tensors = v2.functional.normalize(images.tensors, mean=mean, std=std)
-        # A hack implementation to recover 0.0 in the masked regions:
-        images.tensors = images.tensors * (~images.mask[:, :, None, ...]).to(torch.float32)
-        images.tensors = images.tensors.contiguous()
 
-        # Learning rate warmup:
-        if epoch < lr_warmup_epochs:
-            # Do warmup:
-            lr_warmup(
-                optimizer=optimizer,
-                epoch=epoch, curr_iter=step, tgt_lr=lr_warmup_tgt_lr,
-                warmup_epochs=lr_warmup_epochs, num_iter_per_epoch=len(dataloader),
-            )
+        try:
+            torch.cuda.empty_cache()
+            
+            images, annotations, metas = samples["images"], samples["annotations"], samples["metas"]
+            # Normalize the images:
+            # (Normally, it should be done in the dataloader, but here we do it in the training loop (on cuda).)
+            mean = [0.485, 0.456, 0.406]
+            std = [0.229, 0.224, 0.225]
+            images.tensors = v2.functional.to_dtype(images.tensors, dtype=torch.float32, scale=True)
+            images.tensors = v2.functional.normalize(images.tensors, mean=mean, std=std)
+            # A hack implementation to recover 0.0 in the masked regions:
+            images.tensors = images.tensors * (~images.mask[:, :, None, ...]).to(torch.float32)
+            images.tensors = images.tensors.contiguous()
 
-        _B, _T = len(annotations), len(annotations[0])
-        detr_num_train_frames = min(detr_num_train_frames, _T)
+            # Learning rate warmup:
+            if epoch < lr_warmup_epochs:
+                # Do warmup:
+                lr_warmup(
+                    optimizer=optimizer,
+                    epoch=epoch, curr_iter=step, tgt_lr=lr_warmup_tgt_lr,
+                    warmup_epochs=lr_warmup_epochs, num_iter_per_epoch=len(dataloader),
+                )
 
-        # Prepare the DETR targets from the annotations:
-        detr_targets_flatten = annotations_to_flatten_detr_targets(annotations=annotations, device=device)
+            _B, _T = len(annotations), len(annotations[0])
+            detr_num_train_frames = min(detr_num_train_frames, _T)
 
-        # Select the training and no_grad frames:
-        random_frame_idxs = torch.randperm(_T, device=device)   # use these random indices to select the frames.
-        go_back_frame_idxs = torch.argsort(random_frame_idxs)   # use these indices to go back to the original order.
-        go_back_frame_idxs_flatten = torch.cat([
-            go_back_frame_idxs + _T * b for b in range(_B)
-        ])      # only used for the DETR's criterion.
-        # Split random_frame_idxs into training and no_grad frame indices:
-        detr_train_frame_idxs = random_frame_idxs[:detr_num_train_frames]
-        detr_no_grad_frame_idxs = random_frame_idxs[detr_num_train_frames:]
+            # Prepare the DETR targets from the annotations:
+            detr_targets_flatten = annotations_to_flatten_detr_targets(annotations=annotations, device=device)
 
-        detr_outputs_flatten_idxs = torch.arange(_B * _T, device=device)
-        detr_outputs_flatten_idxs = einops.rearrange(detr_outputs_flatten_idxs, "(b t) -> b t", b=_B)
-        detr_outputs_flatten_idxs = torch.cat([
-            einops.rearrange(detr_outputs_flatten_idxs[:, :detr_num_train_frames], "b t -> (b t)"),
-            einops.rearrange(detr_outputs_flatten_idxs[:, detr_num_train_frames:], "b t -> (b t)"),
-        ], dim=0)
-        detr_outputs_flatten_go_back_idxs = torch.argsort(detr_outputs_flatten_idxs)
-        pass
-        # Select the training and no_grad frames:
-        detr_train_frames = nested_tensor_index_select(images, dim=1, index=detr_train_frame_idxs)
-        detr_no_grad_frames = nested_tensor_index_select(images, dim=1, index=detr_no_grad_frame_idxs)
+            # Select the training and no_grad frames:
+            random_frame_idxs = torch.randperm(_T, device=device)   # use these random indices to select the frames.
+            go_back_frame_idxs = torch.argsort(random_frame_idxs)   # use these indices to go back to the original order.
+            go_back_frame_idxs_flatten = torch.cat([
+                go_back_frame_idxs + _T * b for b in range(_B)
+            ])      # only used for the DETR's criterion.
+            # Split random_frame_idxs into training and no_grad frame indices:
+            detr_train_frame_idxs = random_frame_idxs[:detr_num_train_frames]
+            detr_no_grad_frame_idxs = random_frame_idxs[detr_num_train_frames:]
 
-        # Prepare for the DETR forward function, turn the (B, T, ...) images to (B*T, ...) (or said flatten):
-        detr_train_frames.tensors = einops.rearrange(detr_train_frames.tensors, "b t c h w -> (b t) c h w").contiguous()
-        detr_train_frames.mask = einops.rearrange(detr_train_frames.mask, "b t h w -> (b t) h w").contiguous()
-        detr_no_grad_frames.tensors = einops.rearrange(detr_no_grad_frames.tensors, "b t c h w -> (b t) c h w").contiguous()
-        detr_no_grad_frames.mask = einops.rearrange(detr_no_grad_frames.mask, "b t h w -> (b t) h w").contiguous()
+            detr_outputs_flatten_idxs = torch.arange(_B * _T, device=device)
+            detr_outputs_flatten_idxs = einops.rearrange(detr_outputs_flatten_idxs, "(b t) -> b t", b=_B)
+            detr_outputs_flatten_idxs = torch.cat([
+                einops.rearrange(detr_outputs_flatten_idxs[:, :detr_num_train_frames], "b t -> (b t)"),
+                einops.rearrange(detr_outputs_flatten_idxs[:, detr_num_train_frames:], "b t -> (b t)"),
+            ], dim=0)
+            detr_outputs_flatten_go_back_idxs = torch.argsort(detr_outputs_flatten_idxs)
+            pass
+            # Select the training and no_grad frames:
+            detr_train_frames = nested_tensor_index_select(images, dim=1, index=detr_train_frame_idxs)
+            detr_no_grad_frames = nested_tensor_index_select(images, dim=1, index=detr_no_grad_frame_idxs)
 
-        # TODO: For DeNoise (e.g., in DINO-DETR),
-        #       need to split the detr_targets_flatten into training and no_grad parts.
+            # Prepare for the DETR forward function, turn the (B, T, ...) images to (B*T, ...) (or said flatten):
+            detr_train_frames.tensors = einops.rearrange(detr_train_frames.tensors, "b t c h w -> (b t) c h w").contiguous()
+            detr_train_frames.mask = einops.rearrange(detr_train_frames.mask, "b t h w -> (b t) h w").contiguous()
+            detr_no_grad_frames.tensors = einops.rearrange(detr_no_grad_frames.tensors, "b t c h w -> (b t) c h w").contiguous()
+            detr_no_grad_frames.mask = einops.rearrange(detr_no_grad_frames.mask, "b t h w -> (b t) h w").contiguous()
 
-        # DETR forward:
-        # 1. no_grad frames:
-        if _T > detr_num_train_frames:      # do have no_grad frames (if not, skip this part)
-            with torch.no_grad():
-                if detr_num_checkpoint_frames == 0 or detr_num_checkpoint_frames * 4 >= len(detr_no_grad_frames):
-                    # Directly forward the no_grad frames:
-                    detr_no_grad_outputs = model(frames=detr_no_grad_frames, part="detr")
+            # TODO: For DeNoise (e.g., in DINO-DETR),
+            #       need to split the detr_targets_flatten into training and no_grad parts.
+
+            # DETR forward:
+            # 1. no_grad frames:
+            if _T > detr_num_train_frames:      # do have no_grad frames (if not, skip this part)
+                with torch.no_grad():
+                    if detr_num_checkpoint_frames == 0 or detr_num_checkpoint_frames * 4 >= len(detr_no_grad_frames):
+                        # Directly forward the no_grad frames:
+                        detr_no_grad_outputs = model(frames=detr_no_grad_frames, part="detr")
+                    else:
+                        # Split the no_grad frames into batched iterations (reduce the memory usage):
+                        detr_no_grad_outputs = None
+                        for batch_samples in batch_iterator(
+                            detr_num_checkpoint_frames * 4,
+                            detr_no_grad_frames,
+                        ):
+                            batch_frames = batch_samples[0]
+                            _ = model(frames=batch_frames, part="detr")
+                            detr_no_grad_outputs = tensor_dict_cat(detr_no_grad_outputs, _, dim=0)
+            else:                               # no no_grad frames
+                detr_no_grad_outputs = None
+
+            # 2. training frames:
+            if detr_num_train_frames > 0:
+                if detr_num_checkpoint_frames == 0 or detr_num_checkpoint_frames >= len(detr_train_frames):
+                    # Directly forward the training frames:
+                    detr_train_outputs = model(frames=detr_train_frames, part="detr")
                 else:
-                    # Split the no_grad frames into batched iterations (reduce the memory usage):
-                    detr_no_grad_outputs = None
+                    # Split the training frames into batched iterations (reduce the memory usage):
+                    detr_train_outputs = None
                     for batch_samples in batch_iterator(
-                        detr_num_checkpoint_frames * 4,
-                        detr_no_grad_frames,
+                        detr_num_checkpoint_frames,
+                        detr_train_frames,
                     ):
                         batch_frames = batch_samples[0]
-                        _ = model(frames=batch_frames, part="detr")
-                        detr_no_grad_outputs = tensor_dict_cat(detr_no_grad_outputs, _, dim=0)
-        else:                               # no no_grad frames
-            detr_no_grad_outputs = None
-
-        # 2. training frames:
-        if detr_num_train_frames > 0:
-            if detr_num_checkpoint_frames == 0 or detr_num_checkpoint_frames >= len(detr_train_frames):
-                # Directly forward the training frames:
-                detr_train_outputs = model(frames=detr_train_frames, part="detr")
+                        _ = model(frames=batch_frames, part="detr", use_checkpoint=True)
+                        detr_train_outputs = tensor_dict_cat(detr_train_outputs, _, dim=0)
             else:
-                # Split the training frames into batched iterations (reduce the memory usage):
                 detr_train_outputs = None
-                for batch_samples in batch_iterator(
-                    detr_num_checkpoint_frames,
-                    detr_train_frames,
-                ):
-                    batch_frames = batch_samples[0]
-                    _ = model(frames=batch_frames, part="detr", use_checkpoint=True)
-                    detr_train_outputs = tensor_dict_cat(detr_train_outputs, _, dim=0)
-        else:
-            detr_train_outputs = None
 
-        # Combine training and no_grad outputs:
-        detr_outputs = tensor_dict_cat(detr_train_outputs, detr_no_grad_outputs, dim=0)
-        # Recover the order of the outputs:
-        detr_outputs = tensor_dict_index_select(detr_outputs, index=detr_outputs_flatten_go_back_idxs, dim=0)
-        detr_outputs = tensor_dict_index_select(detr_outputs, index=go_back_frame_idxs_flatten, dim=0)
+            # Combine training and no_grad outputs:
+            detr_outputs = tensor_dict_cat(detr_train_outputs, detr_no_grad_outputs, dim=0)
+            # Recover the order of the outputs:
+            detr_outputs = tensor_dict_index_select(detr_outputs, index=detr_outputs_flatten_go_back_idxs, dim=0)
+            detr_outputs = tensor_dict_index_select(detr_outputs, index=go_back_frame_idxs_flatten, dim=0)
 
-        # DETR criterion:
-        detr_loss_dict, detr_indices = detr_criterion(outputs=detr_outputs, targets=detr_targets_flatten, batch_len=detr_criterion_batch_len)
+            # DETR criterion:
+            detr_loss_dict, detr_indices = detr_criterion(outputs=detr_outputs, targets=detr_targets_flatten, batch_len=detr_criterion_batch_len)
 
-        # Whether to only train the DETR, OR to train the MOTIP together:
-        if not only_detr:
-            _G, _, _N = annotations[0][0]["trajectory_id_labels"].shape
-            # Need to prepare for MOTIP:
-            seq_info = prepare_for_motip(
-                detr_outputs=detr_outputs, annotations=annotations, detr_indices=detr_indices,
-            )
-            seq_info = model(seq_info=seq_info, part="trajectory_modeling")
-            id_logits, id_gts, id_masks = model(
-                seq_info=seq_info,
-                part="id_decoder",
-                use_decoder_checkpoint=use_decoder_checkpoint,
-            )
-            id_loss = id_criterion(id_logits=id_logits, id_labels=id_gts, id_masks=id_masks)
-            _num_gts_per_frame = max(_num_gts_per_frame, id_gts.shape[-1])
-            # print(f"Num of GTs per frame: {_num_gts_per_frame}")
-            pass
-        else:
-            id_loss = None
-
-        # Backward:
-        with accelerator.autocast():
-            detr_weight_dict = detr_criterion.weight_dict
-            detr_loss = sum(
-                detr_loss_dict[k] * detr_weight_dict[k] for k in detr_loss_dict.keys() if k in detr_weight_dict
-            )
-            loss = detr_loss + (id_loss if id_loss is not None else 0) * id_criterion.weight
-            
-            # Logging losses:
-            metrics.update(name="loss", value=loss.item())
-            metrics.update(name="detr_loss", value=detr_loss.item())
-            if id_loss is not None:
-                metrics.update(name="id_loss", value=id_loss.item())
-            for k, v in detr_loss_dict.items():
-                metrics.update(name=k, value=v.item())
-            
-            loss /= accumulate_steps
-            accelerator.backward(loss) 
-
-            if (step + 1) % accumulate_steps == 0:
-                # --- PATCH START ---
-                # Fix: Explicitly unscale once, then use standard PyTorch clipping.
-                # This avoids the "double unscale" error from calling accelerator.clip_grad_norm_ twice.
-                accelerator.unscale_gradients()
-                
-                if separate_clip_norm:
-                    detr_grad_norm = torch.nn.utils.clip_grad_norm_(detr_params, max_clip_norm)
-                    other_grad_norm = torch.nn.utils.clip_grad_norm_(other_params, max_clip_norm)
-                else:
-                    # Clip all parameters together
-                    detr_grad_norm = other_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_clip_norm)
-                # --- PATCH END ---
-
-                # Hack implementation to log grad_norm
-                metrics.update(name="detr_grad_norm", value=detr_grad_norm.item())
-                metrics.update(name="other_grad_norm", value=other_grad_norm.item())
-                
-                optimizer.step()
-                optimizer.zero_grad()
-                
-        # Logging:
-        tps.update(tps=tps.timestamp() - step_timestamp)
-        step_timestamp = tps.timestamp()
-        # Logging:
-        if step % logging_interval == 0:
-            # logger.info(f"[Epoch: {epoch}] [{step}/{total_steps}] [tps: {tps.average:.2f}s]")
-            # Get learning rate for current step:
-            _lr = optimizer.state_dict()["param_groups"][-1]["lr"]
-            # Get the GPU memory usage:
-            torch.cuda.synchronize()
-            _cuda_memory = torch.cuda.max_memory_allocated(device) / 1024 / 1024
-            _cuda_memory = torch.tensor([_cuda_memory], device=device)
-            # _cuda_memory_reduce = accelerator.reduce(_cuda_memory, reduction="none")
-            _gathered_cuda_memory = accelerator.gather(_cuda_memory)
-            _max_cuda_memory = _gathered_cuda_memory.max().item()
-            accelerator.wait_for_everyone()
-            # Clear some values:
-            metrics["lr"].clear()  # clear the learning rate value from last step
-            metrics["max_cuda_mem(MB)"].clear()
-            # Update them to the metrics:
-            metrics.update(name="lr", value=_lr)
-            metrics.update(name="max_cuda_mem(MB)", value=_max_cuda_memory)
-            # Sync the metrics:
-            metrics.sync()
-            eta = tps.eta(total_steps=len(dataloader), current_steps=step)
-            logger.metrics(
-                log=f"[Epoch: {epoch}] [{step}/{len(dataloader)}] "
-                    f"[tps: {tps.average:.2f}s] [eta: {TPS.format(eta)}] ",
-                metrics=metrics,
-                global_step=states["global_step"],
-            )
-        # For multi last checkpoints:
-        if is_last_epochs and multi_last_checkpoints > 0:
-            if (step + 1) == int(math.ceil((len(dataloader) / multi_last_checkpoints) * (current_last_checkpoint_idx + 1))):
-                _dir = os.path.join(outputs_dir, "multi_last_checkpoints")
-                os.makedirs(_dir, exist_ok=True)
-                save_checkpoint(
-                    model=model,
-                    path=os.path.join(_dir, f"last_checkpoint_{current_last_checkpoint_idx}.pth"),
-                    states=states,
-                    optimizer=None,
-                    scheduler=None,
-                    only_detr=only_detr,
+            # Whether to only train the DETR, OR to train the MOTIP together:
+            if not only_detr:
+                _G, _, _N = annotations[0][0]["trajectory_id_labels"].shape
+                # Need to prepare for MOTIP:
+                seq_info = prepare_for_motip(
+                    detr_outputs=detr_outputs, annotations=annotations, detr_indices=detr_indices,
                 )
-                logger.info(
-                    log=f"Save the last checkpoint {current_last_checkpoint_idx} at step {step}."
+                seq_info = model(seq_info=seq_info, part="trajectory_modeling")
+                id_logits, id_gts, id_masks = model(
+                    seq_info=seq_info,
+                    part="id_decoder",
+                    use_decoder_checkpoint=use_decoder_checkpoint,
                 )
-                current_last_checkpoint_idx += 1
-        # Update the counters:
-        states["global_step"] += 1
+                id_loss = id_criterion(id_logits=id_logits, id_labels=id_gts, id_masks=id_masks)
+                _num_gts_per_frame = max(_num_gts_per_frame, id_gts.shape[-1])
+                # print(f"Num of GTs per frame: {_num_gts_per_frame}")
+                pass
+            else:
+                id_loss = None
+
+            # Backward:
+            with accelerator.autocast():
+                detr_weight_dict = detr_criterion.weight_dict
+                detr_loss = sum(
+                    detr_loss_dict[k] * detr_weight_dict[k] for k in detr_loss_dict.keys() if k in detr_weight_dict
+                )
+                loss = detr_loss + (id_loss if id_loss is not None else 0) * id_criterion.weight
+                
+                # Logging losses:
+                metrics.update(name="loss", value=loss.item())
+                metrics.update(name="detr_loss", value=detr_loss.item())
+                if id_loss is not None:
+                    metrics.update(name="id_loss", value=id_loss.item())
+                for k, v in detr_loss_dict.items():
+                    metrics.update(name=k, value=v.item())
+                
+                loss /= accumulate_steps
+                accelerator.backward(loss) 
+
+                if (step + 1) % accumulate_steps == 0:
+                    # --- PATCH START ---
+                    # Fix: Explicitly unscale once, then use standard PyTorch clipping.
+                    # This avoids the "double unscale" error from calling accelerator.clip_grad_norm_ twice.
+                    accelerator.unscale_gradients()
+                    
+                    if separate_clip_norm:
+                        detr_grad_norm = torch.nn.utils.clip_grad_norm_(detr_params, max_clip_norm)
+                        other_grad_norm = torch.nn.utils.clip_grad_norm_(other_params, max_clip_norm)
+                    else:
+                        # Clip all parameters together
+                        detr_grad_norm = other_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_clip_norm)
+                    # --- PATCH END ---
+
+                    # Hack implementation to log grad_norm
+                    metrics.update(name="detr_grad_norm", value=detr_grad_norm.item())
+                    metrics.update(name="other_grad_norm", value=other_grad_norm.item())
+                    
+                    optimizer.step()
+                    optimizer.zero_grad()
+
+            # Logging:
+            tps.update(tps=tps.timestamp() - step_timestamp)
+            step_timestamp = tps.timestamp()
+            # Logging:
+            if step % logging_interval == 0:
+                # logger.info(f"[Epoch: {epoch}] [{step}/{total_steps}] [tps: {tps.average:.2f}s]")
+                # Get learning rate for current step:
+                _lr = optimizer.state_dict()["param_groups"][-1]["lr"]
+                # Get the GPU memory usage:
+                torch.cuda.synchronize()
+                _cuda_memory = torch.cuda.max_memory_allocated(device) / 1024 / 1024
+                _cuda_memory = torch.tensor([_cuda_memory], device=device)
+                # _cuda_memory_reduce = accelerator.reduce(_cuda_memory, reduction="none")
+                _gathered_cuda_memory = accelerator.gather(_cuda_memory)
+                _max_cuda_memory = _gathered_cuda_memory.max().item()
+                accelerator.wait_for_everyone()
+                # Clear some values:
+                metrics["lr"].clear()  # clear the learning rate value from last step
+                metrics["max_cuda_mem(MB)"].clear()
+                # Update them to the metrics:
+                metrics.update(name="lr", value=_lr)
+                metrics.update(name="max_cuda_mem(MB)", value=_max_cuda_memory)
+                # Sync the metrics:
+                metrics.sync()
+                eta = tps.eta(total_steps=len(dataloader), current_steps=step)
+                logger.metrics(
+                    log=f"[Epoch: {epoch}] [{step}/{len(dataloader)}] "
+                        f"[tps: {tps.average:.2f}s] [eta: {TPS.format(eta)}] ",
+                    metrics=metrics,
+                    global_step=states["global_step"],
+                )
+            # For multi last checkpoints:
+            if is_last_epochs and multi_last_checkpoints > 0:
+                if (step + 1) == int(math.ceil((len(dataloader) / multi_last_checkpoints) * (current_last_checkpoint_idx + 1))):
+                    _dir = os.path.join(outputs_dir, "multi_last_checkpoints")
+                    os.makedirs(_dir, exist_ok=True)
+                    save_checkpoint(
+                        model=model,
+                        path=os.path.join(_dir, f"last_checkpoint_{current_last_checkpoint_idx}.pth"),
+                        states=states,
+                        optimizer=None,
+                        scheduler=None,
+                        only_detr=only_detr,
+                    )
+                    logger.info(
+                        log=f"Save the last checkpoint {current_last_checkpoint_idx} at step {step}."
+                    )
+                    current_last_checkpoint_idx += 1
+            # Update the counters:
+            states["global_step"] += 1
+       
+        except torch.OutOfMemoryError:
+            # 🛑 FRIENDLY OOM CATCHER 🛑
+            print(f"\n⚠️  [WARNING] OOM at step {step}. Skipping batch to prevent crash.")
+            print(f"   (Try reducing max_size in config if this happens often.)")
+            
+            # 1. Clear the trash immediately
+            torch.cuda.empty_cache()
+            
+            # 2. Zero gradients so they don't accumulate into the next step
+            optimizer.zero_grad()
+            
+            # 3. Reset timing so the next log doesn't look weird
+            step_timestamp = tps.timestamp()
+            
+            # 4. Skip to next batch
+            continue
+
     states["start_epoch"] += 1
     return metrics
 
@@ -531,7 +553,7 @@ def get_param_groups(model, config) -> list[dict]:
             if _k in _name:
                 return True
         return False
-
+    
     # Keywords:
     backbone_names = config["LR_BACKBONE_NAMES"]
     linear_proj_names = config["LR_LINEAR_PROJ_NAMES"]
