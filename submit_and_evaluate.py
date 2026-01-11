@@ -2,6 +2,7 @@
 # About: Submit or evaluate the model.
 
 import os
+import json
 import time
 import torch
 import subprocess
@@ -255,7 +256,7 @@ def submit_and_evaluate_one_model(
         if accelerator.is_main_process:
             logger.info(log=f"Start evaluation...", only_main=True)
             
-            # --- EVALUATION CONFIGURATION LOGIC ---
+# --- EVALUATION CONFIGURATION LOGIC ---
             tracker_dir = os.path.join(outputs_dir, "tracker")
             
             # Default Settings
@@ -310,8 +311,17 @@ def submit_and_evaluate_one_model(
                 else:
                     cmd.append(v)
             
-            # Execute TrackEval
-            _ = subprocess.run(cmd)
+            # Clone current environment
+            eval_env = os.environ.copy()
+            
+            # Check config for custom mapping and inject as JSON string
+            if val_config and "CLASS_NAME_TO_ID" in val_config:
+                if accelerator.is_main_process:
+                    logger.info(f"Passing custom class mapping to TrackEval: {val_config['CLASS_NAME_TO_ID']}", only_main=True)
+                eval_env["TRACKEVAL_CLASS_MAP"] = json.dumps(val_config["CLASS_NAME_TO_ID"])
+
+            # Execute TrackEval with the new environment
+            _ = subprocess.run(cmd, env=eval_env)
             
             if _.returncode == 0:
                 logger.success("Evaluation script is done.", only_main=True)

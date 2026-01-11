@@ -55,3 +55,6 @@ val_config:
   SEQMAP_FILE: "./datasets/DanceTrack/val_seqmap.txt"
   SPLIT_TO_EVAL: "val"
   CLASSES_TO_EVAL: ['pedestrian', 'car'] 
+  CLASS_NAME_TO_ID: 
+    pedestrian: 1
+    car: 2

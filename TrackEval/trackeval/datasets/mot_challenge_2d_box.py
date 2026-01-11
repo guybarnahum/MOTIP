@@ -1,4 +1,5 @@
 import os
+import json
 import csv
 import configparser
 import numpy as np
@@ -67,17 +68,42 @@ class MotChallenge2DBox(_BaseDataset):
         self.tracker_sub_fol = self.config['TRACKER_SUB_FOLDER']
         self.output_sub_fol = self.config['OUTPUT_SUB_FOLDER']
 
-        # Get classes to eval
-        self.valid_classes = ['pedestrian']
+        # Check if a custom mapping was passed via Environment Variable
+        if "TRACKEVAL_CLASS_MAP" in os.environ:
+            self.class_name_to_class_id = json.loads(os.environ["TRACKEVAL_CLASS_MAP"])
+        else:
+            # Fallback Defaults (Original Hardcoded List)
+            self.class_name_to_class_id = {
+                'pedestrian': 1, 
+                'person_on_vehicle': 2, 
+                'car': 3, 
+                'bicycle': 4, 
+                'motorbike': 5, 
+                'non_mot_vehicle': 6, 
+                'static_person': 7, 
+                'distractor': 8, 
+                'occluder': 9, 
+                'occluder_on_ground': 10, 
+                'occluder_full': 11, 
+                'reflection': 12, 
+                'crowd': 13
+            }
+
+        # Automatically allow ONLY classes defined in the map
+        # This is safer. If it is in the dict, it is valid. If not, it fails here.
+        self.valid_classes = list(self.class_name_to_class_id.keys())
+
+        # Validate the user config
         self.class_list = [cls.lower() if cls.lower() in self.valid_classes else None
                            for cls in self.config['CLASSES_TO_EVAL']]
-        if not all(self.class_list):
-            raise TrackEvalException('Attempted to evaluate an invalid class. Only pedestrian class is valid.')
-        self.class_name_to_class_id = {'pedestrian': 1, 'person_on_vehicle': 2, 'car': 3, 'bicycle': 4, 'motorbike': 5,
-                                       'non_mot_vehicle': 6, 'static_person': 7, 'distractor': 8, 'occluder': 9,
-                                       'occluder_on_ground': 10, 'occluder_full': 11, 'reflection': 12, 'crowd': 13}
-        self.valid_class_numbers = list(self.class_name_to_class_id.values())
 
+        if not all(self.class_list):
+            raise TrackEvalException(f'Attempted to evaluate an invalid class. Valid options are: {self.valid_classes}')
+
+        # Set valid numbers
+        self.valid_class_numbers = list(self.class_name_to_class_id.values())
+        # 4. Set valid numbers
+        self.valid_class_numbers = list(self.class_name_to_class_id.values())
         # Get sequences to eval and check gt files exist
         self.seq_list, self.seq_lengths = self._get_seq_info()
         if len(self.seq_list) < 1:
