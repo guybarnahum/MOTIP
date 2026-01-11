@@ -350,7 +350,10 @@ class MotChallenge2DBox(_BaseDataset):
         distractor_class_names = ['person_on_vehicle', 'static_person', 'distractor', 'reflection']
         if self.benchmark == 'MOT20':
             distractor_class_names.append('non_mot_vehicle')
-        distractor_classes = [self.class_name_to_class_id[x] for x in distractor_class_names]
+        
+        # Only add the class ID if it actually exists in our mapping
+        distractor_classes = [self.class_name_to_class_id[x] for x in distractor_class_names if x in self.class_name_to_class_id]
+        
         cls_id = self.class_name_to_class_id[cls]
 
         data_keys = ['gt_ids', 'tracker_ids', 'gt_dets', 'tracker_dets', 'tracker_confidences', 'similarity_scores']
