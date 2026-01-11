@@ -111,7 +111,6 @@ def submit_and_evaluate(config: dict):
         )
     return
 
-
 def submit_and_evaluate_one_model(
         is_evaluate: bool,
         accelerator: Accelerator,
@@ -124,6 +123,7 @@ def submit_and_evaluate_one_model(
         # Outputs:
         outputs_dir: str,
         # Parameters with defaults:
+        val_config: dict = None,
         image_max_shorter: int = 800,
         image_max_longer: int = 1536,
         size_divisibility: int = 0,
@@ -152,7 +152,6 @@ def submit_and_evaluate_one_model(
     _inference_sequence_names = list(inference_dataset.sequence_infos.keys())
     _inference_sequence_names.sort()
     # If we have multiple GPUs, we need to filter out the sequences that will not be processed in this GPU:
-    # However, there is a special case that the number of GPUs is larger than the number of sequences:
     if len(_inference_sequence_names) <= state.process_index:
         logger.info(
             log=f"Number of sequences is smaller than the number of processes, "
@@ -175,7 +174,6 @@ def submit_and_evaluate_one_model(
 
     # Process each sequence:
     for sequence_name in inference_dataset.sequence_infos.keys():
-        # break
         sequence_dataset = SeqDataset(
             seq_info=inference_dataset.sequence_infos[sequence_name],
             image_paths=inference_dataset.image_paths[sequence_name],
@@ -192,7 +190,6 @@ def submit_and_evaluate_one_model(
             pin_memory=True,
             collate_fn=lambda x: x[0],
         )
-        # sequence_loader = accelerator.prepare(sequence_loader)
         sequence_wh = sequence_dataset.seq_hw()
         runtime_tracker = RuntimeTracker(
             model=model,
@@ -243,7 +240,6 @@ def submit_and_evaluate_one_model(
                                only_main=False)
             else:
                 logger.success(f"Fake submit sequence {sequence_name} done, FPS: {sequence_fps:.2f}.", only_main=False)
-            pass
         else:
             raise NotImplementedError(f"Do not support to submit the results for dataset '{dataset}'.")
 
@@ -257,90 +253,113 @@ def submit_and_evaluate_one_model(
         return None
     else:
         if accelerator.is_main_process:
-            logger.info(
-                log=f"Start evaluation...",
-                only_main=True,
-            )
-            # Prepare for evaluation:
-            if dataset in ["DanceTrack", "SportsMOT", "MOT17", "BFT"]:
-                gt_dir = os.path.join(data_root, dataset, data_split)
-                tracker_dir = os.path.join(outputs_dir, "tracker")
-            elif dataset in ["PersonPath22_Inference"]:
+            logger.info(log=f"Start evaluation...", only_main=True)
+            
+            # --- EVALUATION CONFIGURATION LOGIC ---
+            tracker_dir = os.path.join(outputs_dir, "tracker")
+            
+            # Default Settings
+            gt_dir = os.path.join(data_root, dataset, data_split)
+            seqmap_file = os.path.join(data_root, dataset, f"{data_split}_seqmap.txt")
+            benchmark = "MOT17"
+            classes_to_eval = None # Default: Let TrackEval decide (usually pedestrian)
+
+            # Override with val_config if present
+            if val_config is not None:
+                if "GT_FOLDER" in val_config: gt_dir = val_config["GT_FOLDER"]
+                if "SEQMAP_FILE" in val_config: seqmap_file = val_config["SEQMAP_FILE"]
+                if "BENCHMARK" in val_config: benchmark = val_config["BENCHMARK"]
+                if "CLASSES_TO_EVAL" in val_config: classes_to_eval = val_config["CLASSES_TO_EVAL"]
+
+            # Special case for PersonPath22 defaults
+            if dataset == "PersonPath22_Inference":
                 gt_dir = os.path.join(data_root, dataset, "gts", "person_path_22-test")
-                tracker_dir = os.path.join(outputs_dir, "tracker")
-            else:
-                raise NotImplementedError(f"Do not support to find the gt_dir for dataset '{dataset}'.")
-            if dataset in ["DanceTrack", "SportsMOT", "BFT"] or (dataset in ["MOT17"] and data_split == "test"):
-                args = {
-                    "--SPLIT_TO_EVAL": data_split,
-                    "--METRICS": ["HOTA", "CLEAR", "Identity"],
-                    "--GT_FOLDER": gt_dir,
-                    "--SEQMAP_FILE": os.path.join(data_root, dataset, f"{data_split}_seqmap.txt"),
-                    "--SKIP_SPLIT_FOL": "True",
-                    "--TRACKERS_TO_EVAL": "",
-                    "--TRACKER_SUB_FOLDER": "",
-                    "--USE_PARALLEL": "True",
-                    "--NUM_PARALLEL_CORES": "8",
-                    "--PLOT_CURVES": "False",
-                    "--TRACKERS_FOLDER": tracker_dir,
-                }
-                cmd = ["python", "TrackEval/scripts/run_mot_challenge.py"]
-            elif dataset in ["PersonPath22_Inference"]:
-                args = {
-                    "--SPLIT_TO_EVAL": data_split,
-                    "--METRICS": ["HOTA", "CLEAR", "Identity"],
-                    "--GT_FOLDER": gt_dir,
-                    "--USE_PARALLEL": "True",
-                    "--NUM_PARALLEL_CORES": "8",
-                    "--TRACKERS_FOLDER": tracker_dir,
-                    "--BENCHMARK": "person_path_22",
-                    "--SEQMAP_FILE": os.path.join(data_root, dataset, "gts", "seqmaps", "person_path_22-test.txt"),
-                    "--SKIP_SPLIT_FOL": "True",
-                    "--TRACKER_SUB_FOLDER": "",
-                    "--TRACKERS_TO_EVAL": "",
-                }
+                benchmark = "person_path_22"
+                seqmap_file = os.path.join(data_root, dataset, "gts", "seqmaps", "person_path_22-test.txt")
+
+            # Construct Arguments
+            args = {
+                "--SPLIT_TO_EVAL": data_split,
+                "--METRICS": ["HOTA", "CLEAR", "Identity"],
+                "--GT_FOLDER": gt_dir,
+                "--SEQMAP_FILE": seqmap_file,
+                "--SKIP_SPLIT_FOL": "True",
+                "--TRACKERS_TO_EVAL": "",
+                "--TRACKER_SUB_FOLDER": "",
+                "--USE_PARALLEL": "True",
+                "--NUM_PARALLEL_CORES": "8",
+                "--PLOT_CURVES": "False",
+                "--TRACKERS_FOLDER": tracker_dir,
+                "--BENCHMARK": benchmark,
+            }
+
+            if classes_to_eval is not None:
+                args["--CLASSES_TO_EVAL"] = classes_to_eval
+
+            # Decide which script to run
+            if dataset == "PersonPath22_Inference":
                 cmd = ["python", "TrackEval/scripts/run_person_path_22.py"]
             else:
-                raise NotImplementedError(
-                    f"Do not support to eval the results for dataset '{dataset}' split '{data_split}'."
-                )
+                cmd = ["python", "TrackEval/scripts/run_mot_challenge.py"]
+
+            # Append args to command
             for k, v in args.items():
                 cmd.append(k)
                 if isinstance(v, list):
                     cmd += v
                 else:
                     cmd.append(v)
-            # Run the eval script:
-            _ = subprocess.run(
-                cmd,
-            )
-            # Check if the eval script is done:
+            
+            # Execute TrackEval
+            _ = subprocess.run(cmd)
+            
             if _.returncode == 0:
                 logger.success("Evaluation script is done.", only_main=True)
             else:
                 raise RuntimeError("Evaluation script failed.")
+
         # Wait for all processes:
         accelerator.wait_for_everyone()
+
         # Get the metrics:
-        eval_metrics_path = os.path.join(outputs_dir, "tracker", "pedestrian_summary.txt")
-        eval_metrics_dict = get_eval_metrics_dict(metric_path=eval_metrics_path)
         metrics = Metrics()
-        metrics["HOTA"].update(eval_metrics_dict["HOTA"])
-        metrics["DetA"].update(eval_metrics_dict["DetA"])
-        metrics["AssA"].update(eval_metrics_dict["AssA"])
-        metrics["DetPr"].update(eval_metrics_dict["DetPr"])
-        metrics["DetRe"].update(eval_metrics_dict["DetRe"])
-        metrics["AssPr"].update(eval_metrics_dict["AssPr"])
-        metrics["AssRe"].update(eval_metrics_dict["AssRe"])
-        metrics["MOTA"].update(eval_metrics_dict["MOTA"])
-        metrics["IDF1"].update(eval_metrics_dict["IDF1"])
-        logger.success(
-            log=f"Get evaluation metrics from {eval_metrics_path}.",
-            only_main=True,
-        )
+        
+        # Determine which summary file to read
+        # If user specified classes, we usually read the first class's summary or the 'pedestrian' one.
+        # TrackEval outputs: {class_name}_summary.txt
+        primary_class = "pedestrian"
+        if val_config and "CLASSES_TO_EVAL" in val_config and len(val_config["CLASSES_TO_EVAL"]) > 0:
+             # Just read the first class to get *some* numbers into the logs.
+             # Ideally, we should average them or log all, but for now we pick the first.
+             primary_class = val_config["CLASSES_TO_EVAL"][0]
+        
+        eval_metrics_path = os.path.join(outputs_dir, "tracker", f"{primary_class}_summary.txt")
+        
+        # Fallback check: if primary class summary doesn't exist, try pedestrian
+        if not os.path.exists(eval_metrics_path):
+             alt_path = os.path.join(outputs_dir, "tracker", "pedestrian_summary.txt")
+             if os.path.exists(alt_path):
+                 eval_metrics_path = alt_path
+
+        if os.path.exists(eval_metrics_path):
+            eval_metrics_dict = get_eval_metrics_dict(metric_path=eval_metrics_path)
+            metrics["HOTA"].update(eval_metrics_dict.get("HOTA", 0.0))
+            metrics["DetA"].update(eval_metrics_dict.get("DetA", 0.0))
+            metrics["AssA"].update(eval_metrics_dict.get("AssA", 0.0))
+            metrics["DetPr"].update(eval_metrics_dict.get("DetPr", 0.0))
+            metrics["DetRe"].update(eval_metrics_dict.get("DetRe", 0.0))
+            metrics["AssPr"].update(eval_metrics_dict.get("AssPr", 0.0))
+            metrics["AssRe"].update(eval_metrics_dict.get("AssRe", 0.0))
+            metrics["MOTA"].update(eval_metrics_dict.get("MOTA", 0.0))
+            metrics["IDF1"].update(eval_metrics_dict.get("IDF1", 0.0))
+            logger.success(
+                log=f"Get evaluation metrics from {eval_metrics_path}.",
+                only_main=True,
+            )
+        else:
+            logger.warning(f"Could not find metrics summary file at {eval_metrics_path}. HOTA will be 0.", only_main=True)
 
         return metrics
-
 
 @torch.no_grad()
 def get_results_of_one_sequence(

@@ -228,6 +228,7 @@ def train_engine(config: dict):
                     dataset=config["INFERENCE_DATASET"],
                     data_split=config["INFERENCE_SPLIT"],
                     outputs_dir=os.path.join(outputs_dir, "train", "eval_during_train", f"epoch_{epoch}"),
+                    val_config=config.get("val_config", None),
                     image_max_longer=config["INFERENCE_MAX_LONGER"],
                     size_divisibility=config.get("SIZE_DIVISIBILITY", 0),
                     miss_tolerance=config["MISS_TOLERANCE"],
