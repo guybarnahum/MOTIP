@@ -9,23 +9,32 @@ fi
 
 CONFIG_PATH="$1"
 
-# --- 2. Derive EXP_NAME from filename ---
-# Extract filename (e.g., "bdd_mini.yaml")
+# --- 2. Generate Unique Session Info ---
+# Get filename (e.g. "pretrain_r50_deformable_detr_bdd_mini")
 FILENAME=$(basename -- "$CONFIG_PATH")
-# Remove extension (e.g., "bdd_mini")
-EXP_NAME="${FILENAME%.*}"
+EXP_BASE_NAME="${FILENAME%.*}"
 
-# Create a unique session name (e.g., "motip_bdd_mini")
-SESSION_NAME="motip_${EXP_NAME}"
-OUTPUT_DIR="outputs/${EXP_NAME}"
-LOG_FILE="${OUTPUT_DIR}/train.log"
+# Generate Timestamp (e.g. 20260111_093000)
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 
-# Create output dir if it doesn't exist (for the log file)
-mkdir -p "$OUTPUT_DIR"
+# Create Unique Experiment Name
+# This triggers the code to save to: ./outputs/pretrain_..._20260111_093000/
+UNIQUE_EXP_NAME="${EXP_BASE_NAME}_${TIMESTAMP}"
 
+# Pre-create the folder so we can put the log file there immediately
+OUTPUT_ROOT="outputs/${UNIQUE_EXP_NAME}"
+mkdir -p "$OUTPUT_ROOT"
+LOG_FILE="${OUTPUT_ROOT}/train.log"
+
+SESSION_NAME="motip_${TIMESTAMP}"
+
+echo "========================================================"
 echo "⚙️  Config:  $CONFIG_PATH"
-echo "🏷️  Exp Name: $EXP_NAME"
-echo "🖥️  Session:  $SESSION_NAME"
+echo "📂 Output:  $OUTPUT_ROOT"
+echo "📝 Log:     $LOG_FILE"
+echo "🏷️  ExpID:   $UNIQUE_EXP_NAME"
+echo "🖥️  Session: $SESSION_NAME"
+echo "========================================================"
 
 # --- 3. Check for existing session ---
 tmux has-session -t "$SESSION_NAME" 2>/dev/null
@@ -37,23 +46,14 @@ if [ $? -eq 0 ]; then
     exit 0
 fi
 
-# --- 4. Build Command (Auto-Resume Logic) ---
-# Added PYTORCH_CUDA_ALLOC_CONF before the command
-BASE_CMD="PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True accelerate launch --mixed_precision=fp16 --num_processes=1 train.py --config-path $CONFIG_PATH --exp-name $EXP_NAME"
-FINAL_CMD=""
-
-if [ -f "${OUTPUT_DIR}/checkpoint.pth" ]; then
-    echo "🔄 Found checkpoint. Resuming..."
-    FINAL_CMD="$BASE_CMD --resume ${OUTPUT_DIR}/checkpoint.pth 2>&1 | tee -a $LOG_FILE"
-else
-    echo "✨ Starting fresh training..."
-    FINAL_CMD="$BASE_CMD 2>&1 | tee $LOG_FILE"
-fi
+# --- 4. Build Command ---
+# We ONLY pass --exp-name. We do NOT pass --outputs-dir to avoid the strict config check error.
+BASE_CMD="PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True accelerate launch --mixed_precision=fp16 --num_processes=1 train.py --config-path $CONFIG_PATH --exp-name $UNIQUE_EXP_NAME"
 
 # --- 5. Launch in Tmux ---
 tmux new-session -d -s "$SESSION_NAME"
-tmux send-keys -t "$SESSION_NAME" "$FINAL_CMD" C-m
+# Pipe output to tee so it goes to the file AND the screen
+tmux send-keys -t "$SESSION_NAME" "$BASE_CMD 2>&1 | tee $LOG_FILE" C-m
 
-echo "✅ Training launched in session '$SESSION_NAME'."
-echo "   Log: $LOG_FILE"
-echo "   Run: ./train-attach.sh $SESSION_NAME"
+echo "✅ Training launched!"
+echo "   To view output: tmux attach -t $SESSION_NAME"
