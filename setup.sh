@@ -163,7 +163,7 @@ run_and_log "Install PyTorch" pip install torch==2.4.0 torchvision==0.19.0 torch
 # ---------------- Step 5: Install Python Dependencies ----------------
 echo "📦 Installing MOTIP Dependencies..."
 # Added opencv-python here
-run_and_log "Install Deps" pip install pyyaml tqdm matplotlib scipy pandas wandb accelerate einops "numpy<2" toml opencv-python accelerate
+run_and_log "Install Deps" pip install pyyaml tqdm matplotlib scipy pandas wandb accelerate einops "numpy<2" toml opencv-python accelerate matplotlib
 
 # ---------------- Step 6: Compile Custom Ops ----------------
 echo "⚙️  Compiling Deformable Attention Ops..."
