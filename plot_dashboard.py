@@ -128,7 +128,9 @@ def plot_dashboard(log_path):
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     
-    output_file = "dashboard.png"
+    output_dir = os.path.dirname(log_path)
+    output_file = os.path.join(output_dir, "dashboard.png")
+
     plt.savefig(output_file)
     print(f"✅ Dashboard saved to {output_file}")
 

@@ -10,21 +10,16 @@ fi
 CONFIG_PATH="$1"
 
 # --- 2. Generate Unique Session Info ---
-# Get filename (e.g. "pretrain_r50_deformable_detr_bdd_mini")
 FILENAME=$(basename -- "$CONFIG_PATH")
 EXP_BASE_NAME="${FILENAME%.*}"
-
-# Generate Timestamp (e.g. 20260111_093000)
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-
-# Create Unique Experiment Name
-# This triggers the code to save to: ./outputs/pretrain_..._20260111_093000/
 UNIQUE_EXP_NAME="${EXP_BASE_NAME}_${TIMESTAMP}"
 
-# Pre-create the folder so we can put the log file there immediately
+# Pre-create folder & Empty Log File (Crucial for the monitor to start safely)
 OUTPUT_ROOT="outputs/${UNIQUE_EXP_NAME}"
 mkdir -p "$OUTPUT_ROOT"
 LOG_FILE="${OUTPUT_ROOT}/train.log"
+touch "$LOG_FILE" 
 
 SESSION_NAME="motip_${TIMESTAMP}"
 
@@ -46,14 +41,24 @@ if [ $? -eq 0 ]; then
     exit 0
 fi
 
-# --- 4. Build Command ---
-# We ONLY pass --exp-name. We do NOT pass --outputs-dir to avoid the strict config check error.
-BASE_CMD="PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True accelerate launch --mixed_precision=fp16 --num_processes=1 train.py --config-path $CONFIG_PATH --exp-name $UNIQUE_EXP_NAME"
+# --- 4. Build The Command ---
+# A. Training Command
+TRAIN_CMD="PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True accelerate launch --mixed_precision=fp16 --num_processes=1 train.py --config-path $CONFIG_PATH --exp-name $UNIQUE_EXP_NAME"
+
+# B. Monitor Command (Updates dashboard.png every 60s)
+#    We use 'python' assuming venv is active, or use sys.executable from training if needed.
+MONITOR_CMD="python monitor_training.py $LOG_FILE --interval 60"
+
+# C. Compound Lifecycle Command
+#    1. Start Monitor in Background (&)
+#    2. Save its PID ($!)
+#    3. Run Training (Blocking)
+#    4. Kill Monitor when Training finishes (Success or Fail)
+FINAL_CMD="$MONITOR_CMD > /dev/null 2>&1 & MON_PID=\$!; $TRAIN_CMD 2>&1 | tee $LOG_FILE; kill \$MON_PID"
 
 # --- 5. Launch in Tmux ---
 tmux new-session -d -s "$SESSION_NAME"
-# Pipe output to tee so it goes to the file AND the screen
-tmux send-keys -t "$SESSION_NAME" "$BASE_CMD 2>&1 | tee $LOG_FILE" C-m
+tmux send-keys -t "$SESSION_NAME" "$FINAL_CMD" C-m
 
-echo "✅ Training launched!"
+echo "✅ Training launched with Live Dashboard!"
 echo "   To view output: tmux attach -t $SESSION_NAME"
