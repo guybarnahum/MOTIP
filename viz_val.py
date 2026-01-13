@@ -11,7 +11,8 @@ from tqdm import tqdm
 
 # Import your existing modules
 from memory_manager import LongTermMemory
-from utils_inference import recover_embeddings
+# Added convert_to_h264 to imports
+from utils_inference import recover_embeddings, convert_to_h264
 from models.motip import build as build_model
 from models.runtime_tracker import RuntimeTracker
 
@@ -101,7 +102,10 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args):
     tracker.bbox_unnorm = torch.tensor([W, H, W, H], device=device).float()
     
     gt_data = load_mot_gt(gt_path)
-    out = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (W, H))
+    
+    # Use a temp file for OpenCV writing (mp4v), convert to H.264 later
+    temp_out = output_path.replace(".mp4", "_temp.mp4")
+    out = cv2.VideoWriter(temp_out, cv2.VideoWriter_fourcc(*'mp4v'), fps, (W, H))
     
     mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(1, 3, 1, 1)
     std = torch.tensor([0.229, 0.224, 0.225], device=device).view(1, 3, 1, 1)
@@ -187,7 +191,7 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args):
                 gt_id_to_pred_id[gid] = pid
             # Case 2: ID Switch (Same Car, Different Tracker ID)
             elif previous_pid != pid:
-                color = (0, 0, 255) # Red Alert!
+                color = (0, 165, 255) # Orange (BGR)
                 text = f"SWITCH! {previous_pid}->{pid}"
                 # Update map to accept the new ID as the current valid one
                 gt_id_to_pred_id[gid] = pid
@@ -204,7 +208,7 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args):
         # Legend
         cv2.rectangle(frame, (5, 5), (250, 105), (0,0,0), -1)
         cv2.putText(frame, "Green: Stable Match", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        cv2.putText(frame, "Red Text: ID SWITCH", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+        cv2.putText(frame, "Orange: ID SWITCH", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
         cv2.putText(frame, "Red Box: False Pos", (10, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
         cv2.putText(frame, "Blue: Missed GT", (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
 
@@ -213,7 +217,14 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args):
 
     out.release()
     cap.release()
-    print(f"✅ Saved: {output_path}")
+    
+    # Convert to H.264
+    if os.path.exists(temp_out):
+        convert_to_h264(temp_out, output_path)
+        if os.path.exists(output_path):
+            os.remove(temp_out)
+    else:
+        print(f"✅ Saved: {output_path}")
 
 # -------------------------------------------------------------------------
 # CLI
