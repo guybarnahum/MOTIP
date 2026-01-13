@@ -2,6 +2,7 @@ import argparse
 import cv2
 import torch
 import os
+import sys
 import yaml
 import numpy as np
 import glob
@@ -24,13 +25,9 @@ def patched_get_activate_detections(self, detr_out):
 RuntimeTracker._get_activate_detections = patched_get_activate_detections
 
 # -------------------------------------------------------------------------
-# Helper: Ground Truth Parsing
+# Helper: Ground Truth Parsing (Correct as verified)
 # -------------------------------------------------------------------------
 def load_mot_gt(gt_path):
-    """
-    Parses MOT-format gt.txt: frame, id, x, y, w, h, conf, class, ...
-    Returns: Dict { frame_idx: [ {'bbox': [x1,y1,x2,y2], 'id': int}, ... ] }
-    """
     gt_dict = {}
     if not os.path.exists(gt_path):
         return gt_dict
@@ -40,13 +37,27 @@ def load_mot_gt(gt_path):
             parts = line.strip().split(',')
             frame = int(parts[0])
             obj_id = int(parts[1])
+            # GT is xywh (TopLeft)
             x, y, w, h = map(float, parts[2:6])
+            # Convert to xyxy (Corner)
             x1, y1, x2, y2 = x, y, x + w, y + h
             
             if frame not in gt_dict:
                 gt_dict[frame] = []
             gt_dict[frame].append({'bbox': [x1, y1, x2, y2], 'id': obj_id})
     return gt_dict
+
+# -------------------------------------------------------------------------
+# Helper: Prediction Format Conversion (THE FIX 🔧)
+# -------------------------------------------------------------------------
+def convert_cxcywh_to_xyxy(boxes):
+    """
+    Converts Center-Size [cx, cy, w, h] to Corner-Corner [x1, y1, x2, y2]
+    """
+    x_c, y_c, w, h = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+    b = [(x_c - 0.5 * w), (y_c - 0.5 * h),
+         (x_c + 0.5 * w), (y_c + 0.5 * h)]
+    return np.stack(b, axis=1)
 
 def compute_iou_matrix(preds, gts):
     if len(preds) == 0 or len(gts) == 0:
@@ -90,11 +101,7 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args):
     mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(1, 3, 1, 1)
     std = torch.tensor([0.229, 0.224, 0.225], device=device).view(1, 3, 1, 1)
 
-    # --- ID CONSISTENCY STATE ---
-    # Maps Real Car ID (GT) -> The Model's ID (Pred)
-    # Example: { 101: 5 } means Real Car 101 is currently tracked as ID 5
     gt_id_to_pred_id = {} 
-    
     frame_idx = 1 
     
     while cap.isOpened():
@@ -113,8 +120,11 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args):
         tracker.update(img_norm)
         res = tracker.get_track_results()
         
-        pred_boxes = res['bbox'].cpu().numpy()
+        raw_pred_boxes = res['bbox'].cpu().numpy() # This is [cx, cy, w, h]
         pred_ids = res['id'].tolist()
+        
+        # --- FIX: Convert Predictions to XYXY ---
+        pred_boxes = convert_cxcywh_to_xyxy(raw_pred_boxes)
         
         current_gt = gt_data.get(frame_idx, [])
         gt_boxes = [g['bbox'] for g in current_gt]
@@ -141,10 +151,8 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args):
             if i not in matched_gt_indices:
                 x1, y1, x2, y2 = map(int, gbox)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
-                # Dashed effect (manual)
                 for d in range(x1, x2, 10): cv2.line(frame, (d, y1), (d+5, y1), (255,0,0), 2)
                 for d in range(y1, y2, 10): cv2.line(frame, (x1, d), (x1, d+5), (255,0,0), 2)
-                
                 cv2.putText(frame, f"MISS G:{gt_ids_frame[i]}", (x1, y1-5), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
 
