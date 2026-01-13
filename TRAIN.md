@@ -28,7 +28,14 @@ To train successfully on 24GB cards, the codebase must have:
 
 ### Stage 1: BDD Foundation
 *Status: Complete ✅*
+
 *Goal: Teach the model "What is a car/pedestrian?" vs background.*
+
+<img width="1500" height="1000" alt="dashboard" src="https://github.com/user-attachments/assets/0f5c8e04-29e3-4f44-b29e-e6caff1ab67e" />
+
+*Results Summary*
+
+Stage 1 successfully established a high-precision baseline on the 56-video mini-dataset (~10 hours). The model demonstrates excellent trustworthiness with DetPr: 89.1% and minimal false positives, proving it has learned to distinguish vehicles from background clutter. However, the tracker remains "shy" and "forgetful," characterized by low recall (DetRe: 46.8%) and frequent ID switching (IDF1: 33.7%). Visual validation confirms this behavior, showing distinct "Blue Box" misses (recall failure) and "Orange Box" identity swaps (association failure), highlighting the critical need for Stage 2 to expand data volume and temporal tracking stability.
 
 1.  **Generate Data**:
     * Set `bdd_num = 56` in `builder.py`.
@@ -89,6 +96,7 @@ To train successfully on 24GB cards, the codebase must have:
 
 ### Stage 2: BDD Refinement
 *Status: Planned 🗓️*
+
 *Goal: Scale up data volume to reduce ID switching and improve generalization.*
 
 1.  **Generate Data**:
