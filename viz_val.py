@@ -50,14 +50,19 @@ def load_mot_gt(gt_path):
 # -------------------------------------------------------------------------
 # Helper: Prediction Format Conversion (THE FIX 🔧)
 # -------------------------------------------------------------------------
-def convert_cxcywh_to_xyxy(boxes):
+def convert_tlwh_to_xyxy(boxes):
     """
-    Converts Center-Size [cx, cy, w, h] to Corner-Corner [x1, y1, x2, y2]
+    Converts TopLeft-Size [x1, y1, w, h] to Corner-Corner [x1, y1, x2, y2]
     """
-    x_c, y_c, w, h = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
-    b = [(x_c - 0.5 * w), (y_c - 0.5 * h),
-         (x_c + 0.5 * w), (y_c + 0.5 * h)]
-    return np.stack(b, axis=1)
+    x1 = boxes[:, 0]
+    y1 = boxes[:, 1]
+    w  = boxes[:, 2]
+    h  = boxes[:, 3]
+    
+    x2 = x1 + w
+    y2 = y1 + h
+    
+    return np.stack([x1, y1, x2, y2], axis=1)
 
 def compute_iou_matrix(preds, gts):
     if len(preds) == 0 or len(gts) == 0:
@@ -124,7 +129,7 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args):
         pred_ids = res['id'].tolist()
         
         # --- FIX: Convert Predictions to XYXY ---
-        pred_boxes = convert_cxcywh_to_xyxy(raw_pred_boxes)
+        pred_boxes = convert_tlwh_to_xyxy(raw_pred_boxes)
         
         current_gt = gt_data.get(frame_idx, [])
         gt_boxes = [g['bbox'] for g in current_gt]
@@ -180,7 +185,6 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args):
                 color = (0, 255, 0) # Green
                 text = f"P:{pid} G:{gid}"
                 gt_id_to_pred_id[gid] = pid
-                
             # Case 2: ID Switch (Same Car, Different Tracker ID)
             elif previous_pid != pid:
                 color = (0, 0, 255) # Red Alert!
@@ -189,7 +193,6 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args):
                 gt_id_to_pred_id[gid] = pid
                 # Draw thick border for emphasis
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 4)
-                
             # Case 3: Stable (Same Car, Same Tracker ID)
             else:
                 color = (0, 255, 0) # Green
