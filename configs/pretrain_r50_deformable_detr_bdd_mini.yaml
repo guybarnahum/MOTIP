@@ -16,17 +16,19 @@ RESUME_SCHEDULER: False
 
 # To Reduce Memory force short video clips (3 or 2 frames instead of default 5)
 sampler_lengths: [5]
+# Sample every 2nd or 3rd frame to simulate faster motion/occlusion
+sample_intervals: [2, 3]
 
 # Training Strategy (Mini Dataset)
-EPOCHS: 10
+EPOCHS: 20
 LR: 2.0e-5 
-LR_DROP: 7
+LR_DROP: 15
 LR_BACKBONE: 2.0e-6
 LR_WARMUP_EPOCHS: 0
 
 # Hardware Safety (A10G)
 BATCH_SIZE: 1
-ACCUMULATE_STEPS: 1
+ACCUMULATE_STEPS: 4
 NUM_WORKERS: 4
 
 # Global flag to enable aggressive memory saving techniques
