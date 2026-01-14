@@ -1,69 +1,67 @@
-# TRAIN.md: MOTIP Curriculum Learning Plan
+# TRAIN.md: Universal MOTIP Training Plan (Anti-Forgetting)
 
-This document outlines the 4-stage transfer learning strategy to train MOTIP from generic DanceTrack weights up to a specialized aerial tracker (VisDrone), using BDD100k as the foundational "ground view" bridge.
+This document outlines a **Joint Training Strategy** designed to prevent catastrophic forgetting. Unlike the previous attempt—which flooded the model with cars and erased its person-tracking knowledge—this plan uses the **Frame Budget** system to maintain a balanced diet of "People" and "Vehicles" throughout all stages.
 
-## 📋 Overview
+## 📋 Strategic Overview
 
-Times are based on an **EC2 g5.2xlarge** (Nvidia A10G / 24 GB VRAM):
+**Philosophy:** Never train on a new domain (Cars/Aerial) without "replaying" old domain data (People).
+**Hardware:** EC2 g5.2xlarge (Nvidia A10G / 24 GB VRAM).
 
-| Phase | Stage | Dataset | Size (Videos) | Est. Time | Goal | Base Weights |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **I** | **BDD-Foundation** | BDD-Mini | 56 | ~10 hrs | Learn basic road classes & shapes | `motip_dancetrack.pth` |
-| **I** | **BDD-Refinement** | BDD-Mini | ~150 | ~24 hrs | Improve Recall & Tracking Stability | `output/bdd_stage1/...` |
-| **II** | **Vis-Adaptation** | VisDrone | ~80 | ~12 hrs | Domain Transfer (Ground → Air) | `output/bdd_stage2/...` |
-| **II** | **Vis-Specialist** | VisDrone | ~150 | ~24 hrs | Aerial Crowds & Tiny Objects | `output/visdrone_stage1/...` |
+| Phase | Stage | Dataset Mix (Frame Budget) | Est. Time | Goal | Base Weights |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **I** | **Universal-Foundation** | 50% BDD (Cars)<br>50% DanceTrack (People) | ~12 hrs | Learn "Vehicle" class without forgetting "Person". | `motip_dancetrack.pth` |
+| **I** | **Universal-Refinement** | 50% BDD (Cars)<br>50% DanceTrack (People) | ~24 hrs | Scale up volume for robust long-term association. | `output/stage1/...` |
+| **II** | **Aerial-Adaptation** | 70% VisDrone (Air)<br>30% DT/BDD (Ground Replay) | ~18 hrs | Adapt to aerial view while retaining ground object features. | `output/stage2/...` |
 
 ---
 
 ## 🛠️ Prerequisites
 
-To train successfully on 24GB cards, the codebase must have:
-1.  **OOM Protection**: The `try...except RuntimeError` block in `train.py`.
-2.  **Memory Flag**: `MEMORY_EFFICIENT: True` in configs.
-3.  **Symlink Setup**: `datasets/DanceTrack` should symlink to your dataset build folder (e.g., `output/bdd-mini-dataset`) so strict path checking passes.
+1.  **Codebase:** Ensure `builder.py` has the new **Frame Budget** logic.
+2.  **Config:** Ensure `MEMORY_EFFICIENT: True` is set for 24GB VRAM.
+3.  **Data:** Ensure `datasets/DanceTrack` symlinks to your built dataset output.
 
 ---
 
-## 🏁 Phase 1: BDD100k (Ground View)
+## 🏁 Phase 1: Ground-Level Universality
 
-### Stage 1: BDD Foundation
-*Status: Complete ✅*
+### Stage 1: Balanced Foundation
+*Goal: Multi-class tracking (Person + Vehicle) with equal exposure.*
 
-*Goal: Teach the model "What is a car/pedestrian?" vs background.*
+Instead of showing the model 100% cars, we show it a 50/50 mix. This forces the gradients to optimize for both classes simultaneously.
 
-<img width="1500" height="1000" alt="dashboard" src="https://github.com/user-attachments/assets/0f5c8e04-29e3-4f44-b29e-e6caff1ab67e" />
+1.  **Generate Data (Balanced Mix)**:
+    * Edit `config.toml` to set equal budgets:
+        ```toml
+        [bdd]
+        enabled = true
+        frame_budget = 5000  # ~1000 training samples
 
-*Results Summary*
-
-Stage 1 successfully established a high-precision baseline on the 56-video mini-dataset (~10 hours). The model demonstrates excellent trustworthiness with DetPr: 89.1% and minimal false positives, proving it has learned to distinguish vehicles from background clutter. However, the tracker remains "shy" and "forgetful," characterized by low recall (DetRe: 46.8%) and frequent ID switching (IDF1: 33.7%). Visual validation confirms this behavior, showing distinct "Blue Box" misses (recall failure) and "Orange Box" identity swaps (association failure), highlighting the critical need for Stage 2 to expand data volume and temporal tracking stability.
-
-1.  **Generate Data**:
-    * Set `bdd_num = 56` in `builder.py`.
+        [dancetrack]
+        enabled = true
+        frame_budget = 5000  # ~1000 training samples
+        ```
     * Run: `python builder.py`
-2.  **Config**: `configs/pretrain_r50_deformable_detr_bdd_mini.yaml`
+
+2.  **Config**: `configs/stage1_universal_foundation.yaml`
     ```yaml
-    # Base Architecture (Inherit from DanceTrack)
+    # Inherit from DanceTrack baseline
     SUPER_CONFIG_PATH: ./configs/r50_deformable_detr_motip_dancetrack.yaml
     root_path: "."
 
-    # Dataset & Classes
-    NUM_CLASSES: 2  # Override default 1 (DanceTrack) to 2 (Pedestrian + Car)
+    # ⚠️ CRITICAL: 2 Classes (1=Person, 2=Vehicle)
+    NUM_CLASSES: 2
 
-    # Weights Initialization
+    # Weights: Start from strong Person tracker
     DETR_PRETRAIN: ./pretrains/motip_dancetrack.pth
     RESUME_OPTIMIZER: False
     RESUME_SCHEDULER: False
 
     # Training Strategy
     EPOCHS: 20
-    LR: 2.0e-5 
-    LR_DROP: 15       # Late drop to allow convergence on new heads
+    LR: 2.0e-5
+    LR_DROP: 15
     LR_BACKBONE: 2.0e-6
-    LR_WARMUP_EPOCHS: 0
-
-    # Data Sampling (Robustness)
-    sampler_lengths: [5]
-    sample_intervals: [2, 3] # Skip frames to simulate faster motion
 
     # Hardware Safety (A10G)
     BATCH_SIZE: 1
@@ -72,138 +70,140 @@ Stage 1 successfully established a high-precision baseline on the 56-video mini-
     MEMORY_EFFICIENT: True
     USE_DECODER_CHECKPOINT: True
 
-    # Memory Optimization: Force smaller images
+    # Memory Optimization
     AUG_MAX_SIZE: 1000
     AUG_RESIZE_SCALES: [480, 512, 544, 576, 608, 640]
-    AUG_RANDOM_RESIZE: [400, 500, 600]
 
-    # Automatic Timestamped Output Directory
+    # Output
     OUTPUT_DIR: null
-    OUTPUTS_DIR: null
 
+    # Validation: Evaluate on DanceTrack to ensure NO REGRESSION
     val_config:
       GT_FOLDER: "./datasets/DanceTrack/val"
       SEQMAP_FILE: "./datasets/DanceTrack/val_seqmap.txt"
       SPLIT_TO_EVAL: "val"
-      CLASSES_TO_EVAL: ['pedestrian', 'car'] 
+      # We check 'pedestrian' specifically to monitor forgetting
+      CLASSES_TO_EVAL: ['pedestrian'] 
       CLASS_NAME_TO_ID: 
         pedestrian: 1
-        car: 2
     ```
-3.  **Run**: `./train-start.sh configs/pretrain_r50_deformable_detr_bdd_mini.yaml`
+
+3.  **Run**: `./train-start.sh configs/stage1_universal_foundation.yaml`
 
 ---
 
-### Stage 2: BDD Refinement
-*Status: Planned 🗓️*
+### Stage 2: Scale & Refine
+*Goal: Improved association stability via larger dataset volume.*
 
-*Goal: Scale up data volume to reduce ID switching and improve generalization.*
+1.  **Generate Data (Scale Up)**:
+    * Edit `config.toml`: Double the budgets.
+        ```toml
+        [bdd]
+        frame_budget = 15000
+        [dancetrack]
+        frame_budget = 15000
+        ```
+    * Run: `python builder.py`
 
-1.  **Generate Data**:
-    * Edit `builder.py`: Set `bdd_num = 150`.
-    * Run: `python builder.py` (This adds ~100 new videos).
-2.  **Create Config**: `configs/bdd_stage2.yaml`
-    ```yaml
-    SUPER_CONFIG_PATH: ./configs/r50_deformable_detr_motip_dancetrack.yaml
-    root_path: "."
-
-    # ⚠️ CRITICAL: Point to the actual result file from Stage 1
-    # Example: ./outputs/pretrain_r50_deformable_detr_bdd_mini_20260112_163328/checkpoint_19.pth
-    DETR_PRETRAIN: "PATH_TO_STAGE_1_CHECKPOINT.pth"
-    RESUME_OPTIMIZER: False
-    RESUME_SCHEDULER: False
-
-    NUM_CLASSES: 2
-
-    # Training Strategy (Fine-tuning)
-    EPOCHS: 20
-    LR: 1.0e-5        # Lower LR for refinement
-    LR_DROP: 10       # Drop halfway to settle weights
-    LR_BACKBONE: 1.0e-6
-
-    # Hardware & Memory
-    BATCH_SIZE: 1
-    ACCUMULATE_STEPS: 4
-    NUM_WORKERS: 4
-    MEMORY_EFFICIENT: True
-    USE_DECODER_CHECKPOINT: True
-
-    # Sampling: Shorter clips for speed, but varied intervals for robustness
-    sampler_lengths: [3]
-    sample_intervals: [1, 2]
-
-    # Memory Constraints
-    AUG_MAX_SIZE: 1000
-    AUG_RESIZE_SCALES: [480, 512, 544, 576, 608, 640]
-
-    OUTPUT_DIR: null  # Let script generate timestamped folder
-
-    val_config:
-      GT_FOLDER: "./datasets/DanceTrack/val"
-      SEQMAP_FILE: "./datasets/DanceTrack/val_seqmap.txt"
-      SPLIT_TO_EVAL: "val"
-      CLASSES_TO_EVAL: ['pedestrian', 'car'] 
-      CLASS_NAME_TO_ID: 
-        pedestrian: 1
-        car: 2
-    ```
-3.  **Run**: `./train-start.sh configs/bdd_stage2.yaml`
-
----
-
-## 🚁 Phase 2: VisDrone (Aerial View)
-
-### Stage 3: VisDrone Adaptation
-*Goal: Transfer ground-level features to top-down aerial views.*
-
-1.  **Generate Data**:
-    * Edit `builder.py`: 
-        * `bdd_cfg = {'enabled': False}`
-        * `vis_cfg = {'enabled': True, 'num_videos': 80}`
-    * Run: `python builder.py` (Replaces BDD data with VisDrone).
-2.  **Create Config**: `configs/visdrone_stage1.yaml`
+2.  **Config**: `configs/stage2_universal_refine.yaml`
     ```yaml
     SUPER_CONFIG_PATH: ./configs/r50_deformable_detr_motip_dancetrack.yaml
     
-    # ⚠️ Load from Best BDD Stage 2 Checkpoint
-    DETR_PRETRAIN: "PATH_TO_STAGE_2_CHECKPOINT.pth"
+    # Load Stage 1 Result
+    DETR_PRETRAIN: "outputs/stage1_timestamp/checkpoint_best_idf1.pth"
     RESUME_OPTIMIZER: False
-    
+
     NUM_CLASSES: 2
-    EPOCHS: 20
-    LR: 2.0e-5  # Reset LR to learn new domain features
-    
-    BATCH_SIZE: 1
-    ACCUMULATE_STEPS: 4
-    sampler_lengths: [2]
-    
-    MEMORY_EFFICIENT: True
-    USE_DECODER_CHECKPOINT: True
-    
-    # VisDrone objects are tiny; keep resolution higher if memory permits
-    AUG_MAX_SIZE: 1100 
-    
-    OUTPUT_DIR: null
-    
-    val_config:
-      GT_FOLDER: "./datasets/DanceTrack/val"
-      SEQMAP_FILE: "./datasets/DanceTrack/val_seqmap.txt"
+    EPOCHS: 24
+    LR: 1.0e-5  # Lower LR for refinement
     ```
-3.  **Run**: `./train-start.sh configs/visdrone_stage1.yaml`
+
+3.  **Run**: `./train-start.sh configs/stage2_universal_refine.yaml`
 
 ---
 
-## 📊 Verification & Visualization
+## 🚁 Phase 2: Aerial Adaptation (With Replay)
 
-### 1. Qualitative: Render a Video (Test Set)
-Visualizing a **Test** sequence (unseen data) is the best sanity check.
+### Stage 3: VisDrone + Ground Replay
+*Goal: Learn aerial features (VisDrone) without losing the ground-level capabilities learned in Phase 1.*
+
+If we switch to 100% VisDrone now, the model will forget what a "normal" car looks like. We use a **Replay Buffer** (30% ground data) to anchor the weights.
+
+1.  **Generate Data (Aerial Heavy Mix)**:
+    * Edit `config.toml`:
+        ```toml
+        [bdd]
+        enabled = true
+        frame_budget = 2000  # Ground Replay (Cars)
+
+        [dancetrack]
+        enabled = true
+        frame_budget = 2000  # Ground Replay (People)
+
+        [visdrone]
+        enabled = true
+        frame_budget = 10000 # Primary Task (Aerial)
+        ```
+    * Run: `python builder.py`
+
+2.  **Config**: `configs/stage3_aerial_adapt.yaml`
+    ```yaml
+    SUPER_CONFIG_PATH: ./configs/r50_deformable_detr_motip_dancetrack.yaml
+    
+    # Load Stage 2 Result
+    DETR_PRETRAIN: "outputs/stage2_timestamp/checkpoint_best_idf1.pth"
+    
+    NUM_CLASSES: 2
+    
+    # VisDrone objects are tiny; Increase resolution if memory permits
+    AUG_MAX_SIZE: 1100
+    
+    # Validation: Now we validate on VisDrone (or BDD if you want to check regression)
+    val_config:
+      GT_FOLDER: "datasets/DanceTrack/val" # Or VisDrone val path
+      SEQMAP_FILE: "datasets/DanceTrack/val_seqmap.txt"
+    ```
+
+3.  **Run**: `./train-start.sh configs/stage3_aerial_adapt.yaml`
+
+---
+
+## 📊 Verification & QA
+
+We use a two-pronged validation approach: **Hard Numbers** (Dashboard) and **Visual Truth** (Video Viz).
+
+### 1. Quantitative Heartbeat (Dashboard)
+Use `plot_dashboard.py` to ensure HOTA/IDF1 are rising and Loss is falling.
+
+**When to run:** During or after training.
 
 ```bash
-# Example: Render a specific video using the Stage 1 result
-python run_video.py \
-  --config_path configs/pretrain_r50_deformable_detr_bdd_mini.yaml \
-  --checkpoint outputs/pretrain_r50_deformable_detr_bdd_mini_TIMESTAMP/checkpoint_19.pth \
-  --video_path "datasets/DanceTrack/val/0224ccfa-4551648a/img1/%08d.jpg" \
-  --output_path output/viz_stage1_final.mp4 \
-  --score_thresh 0.4 \
-  --longterm_patience 30
+# Generates dashboard.png in the output folder
+python plot_dashboard.py outputs/stage1_universal_foundation_TIMESTAMP/train.log
+```
+
+
+
+**Success Criteria:**
+* **HOTA/IDF1:** Should be > 54.0 (If it drops to 40s, we have regression).
+* **Grad Norm:** Should be stable (not spiking to Infinity).
+
+### 2. Qualitative Stress Test (Visual Viz)
+Use `viz_val.py` to render "Ground Truth vs Prediction" comparisons. This reveals if the model is ignoring people (Blue Boxes) or hallucinating cars (Red Boxes).
+
+**When to run:** After training completes.
+
+```bash
+# Example: Visualize Stage 1 results on DanceTrack Val
+python viz_val.py \
+    --config configs/stage1_universal_foundation.yaml \
+    --checkpoint outputs/stage1_universal_foundation_TIMESTAMP/checkpoint_best_idf1.pth \
+    --dataset_root datasets/DanceTrack/val \
+    --output_dir outputs/stage1_viz \
+    --score_thresh 0.4
+```
+
+**What to look for in the video:**
+* **Green Boxes:** Stable tracking (Good).
+* **Orange Boxes:** ID Switches (Needs more Stage 2 refinement).
+* **Blue Dashed Boxes:** Missed detections (Regression - model forgot people).
