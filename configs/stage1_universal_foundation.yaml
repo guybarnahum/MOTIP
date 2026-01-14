@@ -23,9 +23,9 @@ RESUME_SCHEDULER: False
 # ------------------------------------------------------------------------
 # Training Strategy
 # ------------------------------------------------------------------------
-EPOCHS: 20
+EPOCHS: 10
 LR: 2.0e-5          # Standard transfer learning rate
-LR_DROP: 15         # Drop late to ensure convergence
+LR_DROP: 7          # # Drop at 7 gives 3 full epochs of fine-grained optimization (30% of training)
 LR_BACKBONE: 2.0e-6
 LR_WARMUP_EPOCHS: 0
 

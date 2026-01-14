@@ -4,14 +4,15 @@ This document outlines a **Joint Training Strategy** designed to prevent catastr
 
 ## 📋 Strategic Overview
 
-**Philosophy:** Never train on a new domain (Cars/Aerial) without "replaying" old domain data (People).
-**Hardware:** EC2 g5.2xlarge (Nvidia A10G / 24 GB VRAM).
+**Hardware Reality:** EC2 g5.2xlarge (A10G). Observed speed is **~1.9 hours/epoch** due to memory safety settings.
+**Strategy:** We utilize "sleeping compute" (overnight runs) with optimized epoch counts to ensure convergence without multi-day waits.
+**Cost Basis:** ~$1.212 / hr (On-Demand).
 
-| Phase | Stage | Dataset Mix (Frame Budget) | Est. Time | Goal | Base Weights |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **I** | **Universal-Foundation** | 50% BDD (Cars)<br>50% DanceTrack (People) | ~12 hrs | Learn "Vehicle" class without forgetting "Person". | `motip_dancetrack.pth` |
-| **I** | **Universal-Refinement** | 50% BDD (Cars)<br>50% DanceTrack (People) | ~24 hrs | Scale up volume for robust long-term association. | `output/stage1/...` |
-| **II** | **Aerial-Adaptation** | 70% VisDrone (Air)<br>30% DT/BDD (Ground Replay) | ~18 hrs | Adapt to aerial view while retaining ground object features. | `output/stage2/...` |
+| Phase | Stage | Dataset Mix (Frame Budget) | Epochs | Est. Time | Est. Cost | Goal |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **I** | **Universal-Foundation** | 50% BDD (Cars)<br>50% DanceTrack (People) | **10** | **~19 hrs** | ~$23.00 | Rapidly learn "Vehicle" class without forgetting "Person". |
+| **I** | **Universal-Refinement** | 50% BDD (Cars)<br>50% DanceTrack (People) | **10** | **~19 hrs** | ~$23.00 | Scale up volume for robust long-term association. |
+| **II** | **Aerial-Adaptation** | 70% VisDrone (Air)<br>30% DT/BDD (Replay) | **10** | **~19 hrs** | ~$23.00 | Adapt to aerial view while retaining ground object features. |
 
 ---
 
@@ -57,10 +58,10 @@ Instead of showing the model 100% cars, we show it a 50/50 mix. This forces the 
     RESUME_OPTIMIZER: False
     RESUME_SCHEDULER: False
 
-    # Training Strategy
-    EPOCHS: 20
+    # Training Strategy (Overnight Run)
+    EPOCHS: 10
     LR: 2.0e-5
-    LR_DROP: 15
+    LR_DROP: 7      # Drop late (70% of training) to allow settling
     LR_BACKBONE: 2.0e-6
 
     # Hardware Safety (A10G)
@@ -114,8 +115,11 @@ Instead of showing the model 100% cars, we show it a 50/50 mix. This forces the 
     RESUME_OPTIMIZER: False
 
     NUM_CLASSES: 2
-    EPOCHS: 24
+    
+    # Refinement Strategy
+    EPOCHS: 10
     LR: 1.0e-5  # Lower LR for refinement
+    LR_DROP: 7
     ```
 
 3.  **Run**: `./train-start.sh configs/stage2_universal_refine.yaml`
@@ -157,6 +161,8 @@ If we switch to 100% VisDrone now, the model will forget what a "normal" car loo
     
     # VisDrone objects are tiny; Increase resolution if memory permits
     AUG_MAX_SIZE: 1100
+    EPOCHS: 10
+    LR_DROP: 7
     
     # Validation: Now we validate on VisDrone (or BDD if you want to check regression)
     val_config:
