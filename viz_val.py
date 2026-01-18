@@ -237,6 +237,22 @@ def generate_html_viewer(output_dir, video_files, template_path="viewer_template
 # CLI
 # -------------------------------------------------------------------------
 if __name__ == "__main__":
+    
+    # ---------------------------------------------------------------------
+    # 🛡️ VRAM SAFETY FUSE
+    # ---------------------------------------------------------------------
+    # We restrict this script to 15% of GPU memory (~3.5GB on A10G).
+    # If it happens to use more, it kills itself before hurting the training run.
+    SAFETY_LIMIT = 0.15 
+    
+    if torch.cuda.is_available():
+        print(f"🔒 ACTIVATING VRAM SAFETY LIMITER: Max {SAFETY_LIMIT*100:.0f}% of GPU")
+        try:
+            torch.cuda.set_per_process_memory_fraction(SAFETY_LIMIT, 0)
+        except RuntimeError:
+            print("⚠️ Warning: Could not set memory limit (CUDA already initialized?)")
+            sys.exit(1)
+            
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='./configs/pretrain_r50_deformable_detr_bdd_mini.yaml')
     parser.add_argument('--checkpoint', type=str, required=True)
@@ -248,39 +264,57 @@ if __name__ == "__main__":
                        help="Path to the HTML viewer template file")
     args = parser.parse_args()
 
-    # Load Config
-    with open(args.config, 'r') as f: cfg = yaml.safe_load(f)
-    if "SUPER_CONFIG_PATH" in cfg:
-        with open(cfg["SUPER_CONFIG_PATH"], 'r') as f_base:
-            base_cfg = yaml.safe_load(f_base)
-        base_cfg.update(cfg)
-        cfg = base_cfg
+    try:
+        # Load Config
+        with open(args.config, 'r') as f: cfg = yaml.safe_load(f)
+        if "SUPER_CONFIG_PATH" in cfg:
+            with open(cfg["SUPER_CONFIG_PATH"], 'r') as f_base:
+                base_cfg = yaml.safe_load(f_base)
+            base_cfg.update(cfg)
+            cfg = base_cfg
 
-    # Init Model
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = build_model(cfg)[0].to(device)
-    ckpt = torch.load(args.checkpoint, map_location='cpu')
-    model.load_state_dict(ckpt.get('model', ckpt), strict=False)
-    model.eval()
+        # Init Model
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        model = build_model(cfg)[0].to(device)
+        ckpt = torch.load(args.checkpoint, map_location='cpu')
+        model.load_state_dict(ckpt.get('model', ckpt), strict=False)
+        model.eval()
 
-    os.makedirs(args.output_dir, exist_ok=True)
-    seqs = sorted(glob.glob(os.path.join(args.dataset_root, '*')))
-    
-    generated_videos = []
-
-    for seq in tqdm(seqs):
-        if not os.path.isdir(seq): continue
-        seq_name = os.path.basename(seq)
-        gt_path = os.path.join(seq, 'gt/gt.txt')
-        out_path = os.path.join(args.output_dir, f"{seq_name}_id_viz.mp4")
+        os.makedirs(args.output_dir, exist_ok=True)
+        seqs = sorted(glob.glob(os.path.join(args.dataset_root, '*')))
         
-        process_sequence(seq, gt_path, out_path, model, device, args)
-        
-        if os.path.exists(out_path):
-            generated_videos.append(out_path)
+        generated_videos = []
 
-    # Final Step: Generate Viewer
-    if generated_videos:
-        generate_html_viewer(args.output_dir, generated_videos, args.html_template)
-    else:
-        print("⚠️ No videos generated. Check dataset path.")
+        for seq in tqdm(seqs):
+            if not os.path.isdir(seq): continue
+            seq_name = os.path.basename(seq)
+            gt_path = os.path.join(seq, 'gt/gt.txt')
+            out_path = os.path.join(args.output_dir, f"{seq_name}_id_viz.mp4")
+            
+            process_sequence(seq, gt_path, out_path, model, device, args)
+            
+            if os.path.exists(out_path):
+                generated_videos.append(out_path)
+
+        # Final Step: Generate Viewer
+        if generated_videos:
+            generate_html_viewer(args.output_dir, generated_videos, args.html_template)
+        else:
+            print("⚠️ No videos generated. Check dataset path.")
+
+    except torch.cuda.OutOfMemoryError:
+        print("\n" + "🟥"*32)
+        print("VRAM SAFETY FUSE BLOWN")
+        print("🟥"*32)
+        print(f"The script probbaly hit the {SAFETY_LIMIT*100:.0f}% memory limit and stopped itself.")
+        print("\n✅ GOOD NEWS: any training run or other GPU work are SAFE.")
+        print("❌ BAD NEWS: Visualization could not finish.")
+        print("👉 ACTION: Wait for GPU availabiliy and run again.")
+        print("="*64 + "\n")
+        sys.exit(1)
+        
+    except Exception as e:
+        print(f"\n❌ ERROR: {e}")
+        # Optional: Print traceback to debug
+        import traceback; traceback.print_exc()
+        sys.exit(1)
