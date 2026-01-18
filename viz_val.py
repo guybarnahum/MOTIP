@@ -244,7 +244,7 @@ if __name__ == "__main__":
     parser.add_argument('--output_dir', type=str, default='./outputs/stage1_id_viz')
     parser.add_argument('--score_thresh', type=float, default=0.4)
     # New argument to specify template location if needed
-    parser.add_argument('--html_template', type=str, default='viewer_template.html', 
+    parser.add_argument('--html_template', type=str, default='viz_viewer.html', 
                        help="Path to the HTML viewer template file")
     args = parser.parse_args()
 
