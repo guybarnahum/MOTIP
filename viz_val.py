@@ -6,12 +6,13 @@ import sys
 import yaml
 import numpy as np
 import glob
+import json
+import shutil
 from scipy.optimize import linear_sum_assignment
 from tqdm import tqdm
 
 # Import your existing modules
 from memory_manager import LongTermMemory
-# Added convert_to_h264 to imports
 from utils_inference import recover_embeddings, convert_to_h264
 from models.motip import build as build_model
 from models.runtime_tracker import RuntimeTracker
@@ -26,7 +27,7 @@ def patched_get_activate_detections(self, detr_out):
 RuntimeTracker._get_activate_detections = patched_get_activate_detections
 
 # -------------------------------------------------------------------------
-# Helper: Ground Truth Parsing (Correct as verified)
+# Helper: Ground Truth Parsing
 # -------------------------------------------------------------------------
 def load_mot_gt(gt_path):
     gt_dict = {}
@@ -49,7 +50,7 @@ def load_mot_gt(gt_path):
     return gt_dict
 
 # -------------------------------------------------------------------------
-# Helper: Prediction Format Conversion (THE FIX 🔧)
+# Helper: Prediction Format Conversion
 # -------------------------------------------------------------------------
 def convert_tlwh_to_xyxy(boxes):
     """
@@ -59,10 +60,8 @@ def convert_tlwh_to_xyxy(boxes):
     y1 = boxes[:, 1]
     w  = boxes[:, 2]
     h  = boxes[:, 3]
-    
     x2 = x1 + w
     y2 = y1 + h
-    
     return np.stack([x1, y1, x2, y2], axis=1)
 
 def compute_iou_matrix(preds, gts):
@@ -103,7 +102,7 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args):
     
     gt_data = load_mot_gt(gt_path)
     
-    # Use a temp file for OpenCV writing (mp4v), convert to H.264 later
+    # Temp file for OpenCV writing
     temp_out = output_path.replace(".mp4", "_temp.mp4")
     out = cv2.VideoWriter(temp_out, cv2.VideoWriter_fourcc(*'mp4v'), fps, (W, H))
     
@@ -117,7 +116,7 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args):
         ret, frame = cap.read()
         if not ret: break
 
-        # 1. Inference
+        # Inference
         t_img = torch.from_numpy(frame).to(device).permute(2, 0, 1).float() / 255.0
         h, w = t_img.shape[1:]
         scale = 800 / min(h, w)
@@ -129,17 +128,15 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args):
         tracker.update(img_norm)
         res = tracker.get_track_results()
         
-        raw_pred_boxes = res['bbox'].cpu().numpy() # This is [cx, cy, w, h]
+        raw_pred_boxes = res['bbox'].cpu().numpy()
         pred_ids = res['id'].tolist()
-        
-        # --- FIX: Convert Predictions to XYXY ---
         pred_boxes = convert_tlwh_to_xyxy(raw_pred_boxes)
         
         current_gt = gt_data.get(frame_idx, [])
         gt_boxes = [g['bbox'] for g in current_gt]
         gt_ids_frame = [g['id'] for g in current_gt]
         
-        # 3. Match Predictions to GT
+        # Match Predictions to GT
         iou_matrix = compute_iou_matrix(pred_boxes, gt_boxes)
         row_ind, col_ind = linear_sum_assignment(1 - iou_matrix)
         
@@ -153,19 +150,16 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args):
                 matched_gt_indices.add(c)
                 matched_pred_indices.add(r)
 
-        # 4. Draw & Analyze
-        
-        # A. Misses (Blue Dashed)
+        # Draw
+        # Misses (Blue)
         for i, gbox in enumerate(gt_boxes):
             if i not in matched_gt_indices:
                 x1, y1, x2, y2 = map(int, gbox)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
-                for d in range(x1, x2, 10): cv2.line(frame, (d, y1), (d+5, y1), (255,0,0), 2)
-                for d in range(y1, y2, 10): cv2.line(frame, (x1, d), (x1, d+5), (255,0,0), 2)
                 cv2.putText(frame, f"MISS G:{gt_ids_frame[i]}", (x1, y1-5), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
 
-        # B. False Positives (Red)
+        # False Positives (Red)
         for i, pbox in enumerate(pred_boxes):
             if i not in matched_pred_indices:
                 x1, y1, x2, y2 = map(int, pbox)
@@ -173,33 +167,25 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args):
                 cv2.putText(frame, f"FP P:{pred_ids[i]}", (x1, y1-5), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
 
-        # C. True Positives + ID CHECK (Green or Alert)
+        # Matches (Green/Orange)
         for r, c in matches:
             pbox = pred_boxes[r]
             pid = pred_ids[r]
             gid = gt_ids_frame[c]
-            
             x1, y1, x2, y2 = map(int, pbox)
             
-            # --- ID LOGIC ---
             previous_pid = gt_id_to_pred_id.get(gid)
-            
-            # Case 1: New Car (First time seeing this GT ID)
             if previous_pid is None:
-                color = (0, 255, 0) # Green
+                color = (0, 255, 0)
                 text = f"P:{pid} G:{gid}"
                 gt_id_to_pred_id[gid] = pid
-            # Case 2: ID Switch (Same Car, Different Tracker ID)
             elif previous_pid != pid:
-                color = (0, 165, 255) # Orange (BGR)
+                color = (0, 165, 255) # Orange
                 text = f"SWITCH! {previous_pid}->{pid}"
-                # Update map to accept the new ID as the current valid one
                 gt_id_to_pred_id[gid] = pid
-                # Draw thick border for emphasis
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 4)
-            # Case 3: Stable (Same Car, Same Tracker ID)
             else:
-                color = (0, 255, 0) # Green
+                color = (0, 255, 0)
                 text = f"P:{pid} G:{gid}"
 
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
@@ -218,13 +204,34 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args):
     out.release()
     cap.release()
     
-    # Convert to H.264
+    # H.264 Conversion
     if os.path.exists(temp_out):
         convert_to_h264(temp_out, output_path)
         if os.path.exists(output_path):
             os.remove(temp_out)
+
+def generate_html_viewer(output_dir, video_files, template_path="viewer_template.html"):
+    """Generates the viewer by creating video_data.js and copying the HTML template."""
+    print(f"📝 Generating HTML viewer for {len(video_files)} videos...")
+    
+    filenames = [os.path.basename(f) for f in video_files]
+    
+    # 1. Write Data JS
+    js_path = os.path.join(output_dir, "video_data.js")
+    with open(js_path, "w", encoding="utf-8") as f:
+        f.write(f"const videoList = {json.dumps(filenames, indent=2)};")
+
+    # 2. Copy Template to index.html
+    dest_path = os.path.join(output_dir, "index.html")
+    
+    if os.path.exists(template_path):
+        shutil.copy(template_path, dest_path)
+        print(f"✅ Viewer generated: {dest_path}")
+        print(f"   Data File: {js_path}")
+        print(f"   To view: cd {output_dir} && python -m http.server")
     else:
-        print(f"✅ Saved: {output_path}")
+        print(f"⚠️  Template file '{template_path}' not found! Generated only data JS.")
+        print(f"   Please place 'viewer_template.html' in the working directory.")
 
 # -------------------------------------------------------------------------
 # CLI
@@ -236,8 +243,12 @@ if __name__ == "__main__":
     parser.add_argument('--dataset_root', type=str, default='./datasets/DanceTrack/val')
     parser.add_argument('--output_dir', type=str, default='./outputs/stage1_id_viz')
     parser.add_argument('--score_thresh', type=float, default=0.4)
+    # New argument to specify template location if needed
+    parser.add_argument('--html_template', type=str, default='viewer_template.html', 
+                       help="Path to the HTML viewer template file")
     args = parser.parse_args()
 
+    # Load Config
     with open(args.config, 'r') as f: cfg = yaml.safe_load(f)
     if "SUPER_CONFIG_PATH" in cfg:
         with open(cfg["SUPER_CONFIG_PATH"], 'r') as f_base:
@@ -245,6 +256,7 @@ if __name__ == "__main__":
         base_cfg.update(cfg)
         cfg = base_cfg
 
+    # Init Model
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = build_model(cfg)[0].to(device)
     ckpt = torch.load(args.checkpoint, map_location='cpu')
@@ -254,9 +266,21 @@ if __name__ == "__main__":
     os.makedirs(args.output_dir, exist_ok=True)
     seqs = sorted(glob.glob(os.path.join(args.dataset_root, '*')))
     
+    generated_videos = []
+
     for seq in tqdm(seqs):
         if not os.path.isdir(seq): continue
         seq_name = os.path.basename(seq)
         gt_path = os.path.join(seq, 'gt/gt.txt')
         out_path = os.path.join(args.output_dir, f"{seq_name}_id_viz.mp4")
+        
         process_sequence(seq, gt_path, out_path, model, device, args)
+        
+        if os.path.exists(out_path):
+            generated_videos.append(out_path)
+
+    # Final Step: Generate Viewer
+    if generated_videos:
+        generate_html_viewer(args.output_dir, generated_videos, args.html_template)
+    else:
+        print("⚠️ No videos generated. Check dataset path.")
