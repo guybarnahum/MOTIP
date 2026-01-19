@@ -15,7 +15,7 @@ from tqdm import tqdm
 # Import your existing modules
 from memory_manager import LongTermMemory
 from utils_inference import recover_embeddings
-# Removed convert_to_h264 from import to use local version
+# models.motip imports torch, but VRAM alloc only happens on .to(device) or inference
 from models.motip import build as build_model
 from models.runtime_tracker import RuntimeTracker
 
@@ -101,7 +101,6 @@ def convert_to_h264_quiet(input_path, output_path):
             output_path
         ]
         subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        # Use tqdm.write to print safely above the progress bar
         tqdm.write(f"✅ H.264: {os.path.basename(output_path)}")
     except subprocess.CalledProcessError:
         tqdm.write(f"❌ Error converting {os.path.basename(input_path)}")
@@ -228,7 +227,7 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args):
     out.release()
     cap.release()
     
-    # H.264 Conversion (Using local quiet function)
+    # H.264 Conversion (Safe)
     if os.path.exists(temp_out):
         convert_to_h264_quiet(temp_out, output_path)
         if os.path.exists(output_path):
@@ -240,7 +239,6 @@ def copy_training_metrics(checkpoint_path, output_dir):
     Returns True if found and copied, False otherwise.
     """
     ckpt_dir = os.path.dirname(checkpoint_path)
-    # Common names for training plots
     potential_names = ['train.png', 'loss.png', 'metrics.png']
     
     found_path = None
@@ -256,25 +254,18 @@ def copy_training_metrics(checkpoint_path, output_dir):
         shutil.copy(found_path, dest)
         return True
     else:
-        # Only print a warning if metrics are missing
-        # print("⚠️  No 'train.png' found in checkpoint directory.")
         return False
 
 def generate_html_viewer(output_dir, video_files, template_path="viz_viewer.html"):
     """Generates the viewer by creating video_data.js and copying the HTML template."""
     print(f"📝 Generating Portable HTML viewer for {len(video_files)} videos...")
     
-    # [IMPORTANT] extracting basename makes this portable!
-    # Users can SCP the output_dir and it will still work locally.
     filenames = [os.path.basename(f) for f in video_files]
     
-    # 1. Write Data JS with metrics flag
     js_path = os.path.join(output_dir, "video_data.js")
     with open(js_path, "w", encoding="utf-8") as f:
-        # Removed hasMetrics write to allow dynamic JS detection
         f.write(f"const videoList = {json.dumps(filenames, indent=2)};\n")
 
-    # 2. Copy Template to index.html
     dest_path = os.path.join(output_dir, "index.html")
     
     if os.path.exists(template_path):
@@ -291,25 +282,10 @@ def generate_html_viewer(output_dir, video_files, template_path="viz_viewer.html
 # -------------------------------------------------------------------------
 if __name__ == "__main__":
     
-    # ---------------------------------------------------------------------
-    # 🛡️ VRAM SAFETY FUSE
-    # ---------------------------------------------------------------------
-    # We restrict this script to 15% of GPU memory (~3.5GB on A10G).
-    # If it happens to use more, it kills itself before hurting the training run.
-    SAFETY_LIMIT = 0.15 
-    
-    if torch.cuda.is_available():
-        print(f"🔒 ACTIVATING VRAM SAFETY LIMITER: Max {SAFETY_LIMIT*100:.0f}% of GPU")
-        try:
-            torch.cuda.set_per_process_memory_fraction(SAFETY_LIMIT, 0)
-        except RuntimeError:
-            print("⚠️ Warning: Could not set memory limit (CUDA already initialized?)")
-            print("❌ CRITICAL SAFETY ERROR: Aborting to protect active training run.")
-            sys.exit(1)
-            
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='./configs/pretrain_r50_deformable_detr_bdd_mini.yaml')
-    parser.add_argument('--checkpoint', type=str, required=True)
+    # Checkpoint optional in argparse, manually checked later
+    parser.add_argument('--checkpoint', type=str, default=None)
     
     # Input Modes
     parser.add_argument('--dataset_root', type=str, default='./datasets/DanceTrack/val',
@@ -319,28 +295,51 @@ if __name__ == "__main__":
     
     parser.add_argument('--output_dir', type=str, default='./outputs/stage1_id_viz')
     parser.add_argument('--score_thresh', type=float, default=0.4)
-    # New argument to specify template location if needed
     parser.add_argument('--html_template', type=str, default='viz_viewer.html', 
                        help="Path to the HTML viewer template file")
     
-    # New Argument: HTML Only
+    # New Flag
     parser.add_argument('--html_only', action='store_true', 
                        help="Skip video generation and only regenerate the HTML viewer")
     
     args = parser.parse_args()
 
-    try:
-        generated_videos = []
-        os.makedirs(args.output_dir, exist_ok=True)
+    # Manual Validation: Checkpoint is required ONLY if NOT html_only
+    if not args.html_only and args.checkpoint is None:
+        parser.error("the following arguments are required: --checkpoint")
 
+    # ---------------------------------------------------------------------
+    # 🛡️ VRAM SAFETY FUSE (Skip if HTML Only)
+    # ---------------------------------------------------------------------
+    SAFETY_LIMIT = 0.15 
+    if not args.html_only and torch.cuda.is_available():
+        print(f"🔒 ACTIVATING VRAM SAFETY LIMITER: Max {SAFETY_LIMIT*100:.0f}% of GPU")
+        try:
+            torch.cuda.set_per_process_memory_fraction(SAFETY_LIMIT, 0)
+        except RuntimeError:
+            print("⚠️ Warning: Could not set memory limit (CUDA already initialized?)")
+            print("❌ CRITICAL SAFETY ERROR: Aborting to protect active training run.")
+            sys.exit(1)
+
+    try:
+        os.makedirs(args.output_dir, exist_ok=True)
+        generated_videos = []
+
+        # --- HTML ONLY MODE ---
         if args.html_only:
             print("⏩ HTML Only Mode: Skipping model loading and video generation.")
-            # Scan for existing mp4 files in output directory
-            existing_mp4s = sorted(glob.glob(os.path.join(args.output_dir, '*.mp4')))
-            generated_videos = existing_mp4s
+            # Scan output dir for existing mp4s
+            generated_videos = sorted(glob.glob(os.path.join(args.output_dir, '*.mp4')))
             print(f"   Found {len(generated_videos)} existing videos.")
+            
+            # Optional copy of metrics if checkpoint path was provided (but not required)
+            if args.checkpoint:
+                copy_training_metrics(args.checkpoint, args.output_dir)
+            
+            generate_html_viewer(args.output_dir, generated_videos, args.html_template)
+            
         else:
-            # Normal Mode: Load Model and Process
+            # --- NORMAL PROCESSING MODE ---
             with open(args.config, 'r') as f: cfg = yaml.safe_load(f)
             if "SUPER_CONFIG_PATH" in cfg:
                 with open(cfg["SUPER_CONFIG_PATH"], 'r') as f_base:
@@ -368,7 +367,6 @@ if __name__ == "__main__":
             
             for seq in tqdm(seqs):
                 if not os.path.isdir(seq): continue
-                # Use folder name as filename, stripping trailing slash if present
                 seq_name = os.path.basename(seq.rstrip('/')) 
                 gt_path = os.path.join(seq, 'gt/gt.txt')
                 out_path = os.path.join(args.output_dir, f"{seq_name}_id_viz.mp4")
@@ -378,15 +376,14 @@ if __name__ == "__main__":
                 if os.path.exists(out_path):
                     generated_videos.append(out_path)
 
-        # Common Steps (Always Run)
-        # 1. Try to copy train.png
-        copy_training_metrics(args.checkpoint, args.output_dir)
+            # Copy Metrics
+            copy_training_metrics(args.checkpoint, args.output_dir)
 
-        # 2. Generate Viewer
-        if generated_videos or args.html_only:
-            generate_html_viewer(args.output_dir, generated_videos, args.html_template)
-        else:
-            print("⚠️ No videos generated. Check dataset path.")
+            # Generate Viewer
+            if generated_videos:
+                generate_html_viewer(args.output_dir, generated_videos, args.html_template)
+            else:
+                print("⚠️ No videos generated. Check dataset path.")
 
     except torch.cuda.OutOfMemoryError:
         print("\n" + "🟥"*32)
