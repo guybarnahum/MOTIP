@@ -8,12 +8,14 @@ import numpy as np
 import glob
 import json
 import shutil
+import subprocess
 from scipy.optimize import linear_sum_assignment
 from tqdm import tqdm
 
 # Import your existing modules
 from memory_manager import LongTermMemory
-from utils_inference import recover_embeddings, convert_to_h264
+from utils_inference import recover_embeddings
+# Removed convert_to_h264 from import to use local version
 from models.motip import build as build_model
 from models.runtime_tracker import RuntimeTracker
 
@@ -82,6 +84,27 @@ def compute_iou_matrix(preds, gts):
                 union = p_area + g_area - inter
                 iou_matrix[i, j] = inter / union
     return iou_matrix
+
+# -------------------------------------------------------------------------
+# Helper: H.264 Conversion (Quiet)
+# -------------------------------------------------------------------------
+def convert_to_h264_quiet(input_path, output_path):
+    """
+    Converts video to H.264 using ffmpeg without breaking tqdm.
+    """
+    try:
+        command = [
+            'ffmpeg', '-y', '-i', input_path,
+            '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+            '-pix_fmt', 'yuv420p',
+            '-loglevel', 'error', # Suppress ffmpeg output
+            output_path
+        ]
+        subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Use tqdm.write to print safely above the progress bar
+        tqdm.write(f"✅ H.264: {os.path.basename(output_path)}")
+    except subprocess.CalledProcessError:
+        tqdm.write(f"❌ Error converting {os.path.basename(input_path)}")
 
 # -------------------------------------------------------------------------
 # Main Processor
@@ -192,13 +215,11 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args):
             cv2.putText(frame, text, (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
         # Legend
-        # Expanded box height to fit the score threshold line
         cv2.rectangle(frame, (5, 5), (250, 130), (0,0,0), -1)
         cv2.putText(frame, "Green: Stable Match", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
         cv2.putText(frame, "Orange: ID SWITCH", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
         cv2.putText(frame, "Red Box: False Pos", (10, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
         cv2.putText(frame, "Blue: Missed GT", (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
-        # Added Score Threshold display
         cv2.putText(frame, f"Score Thresh: {args.score_thresh}", (10, 125), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
         out.write(frame)
@@ -207,9 +228,9 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args):
     out.release()
     cap.release()
     
-    # H.264 Conversion
+    # H.264 Conversion (Using local quiet function)
     if os.path.exists(temp_out):
-        convert_to_h264(temp_out, output_path)
+        convert_to_h264_quiet(temp_out, output_path)
         if os.path.exists(output_path):
             os.remove(temp_out)
 
@@ -239,7 +260,7 @@ def copy_training_metrics(checkpoint_path, output_dir):
         # print("⚠️  No 'train.png' found in checkpoint directory.")
         return False
 
-def generate_html_viewer(output_dir, video_files, has_metrics=False, template_path="viz_viewer.html"):
+def generate_html_viewer(output_dir, video_files, template_path="viz_viewer.html"):
     """Generates the viewer by creating video_data.js and copying the HTML template."""
     print(f"📝 Generating Portable HTML viewer for {len(video_files)} videos...")
     
@@ -250,9 +271,8 @@ def generate_html_viewer(output_dir, video_files, has_metrics=False, template_pa
     # 1. Write Data JS with metrics flag
     js_path = os.path.join(output_dir, "video_data.js")
     with open(js_path, "w", encoding="utf-8") as f:
-        # We pass hasMetrics as a boolean so the JS knows whether to show the tab
+        # Removed hasMetrics write to allow dynamic JS detection
         f.write(f"const videoList = {json.dumps(filenames, indent=2)};\n")
-        f.write(f"const hasMetrics = {str(has_metrics).lower()};\n")
 
     # 2. Copy Template to index.html
     dest_path = os.path.join(output_dir, "index.html")
@@ -302,58 +322,69 @@ if __name__ == "__main__":
     # New argument to specify template location if needed
     parser.add_argument('--html_template', type=str, default='viz_viewer.html', 
                        help="Path to the HTML viewer template file")
+    
+    # New Argument: HTML Only
+    parser.add_argument('--html_only', action='store_true', 
+                       help="Skip video generation and only regenerate the HTML viewer")
+    
     args = parser.parse_args()
 
     try:
-        # Load Config
-        with open(args.config, 'r') as f: cfg = yaml.safe_load(f)
-        if "SUPER_CONFIG_PATH" in cfg:
-            with open(cfg["SUPER_CONFIG_PATH"], 'r') as f_base:
-                base_cfg = yaml.safe_load(f_base)
-            base_cfg.update(cfg)
-            cfg = base_cfg
-
-        # Init Model
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        model = build_model(cfg)[0].to(device)
-        ckpt = torch.load(args.checkpoint, map_location='cpu')
-        model.load_state_dict(ckpt.get('model', ckpt), strict=False)
-        model.eval()
-
-        os.makedirs(args.output_dir, exist_ok=True)
-        
-        # --- Logic: Single Video vs Dataset ---
-        if args.input_video:
-            if not os.path.exists(args.input_video):
-                print(f"❌ Error: Input path not found: {args.input_video}")
-                sys.exit(1)
-            seqs = [args.input_video]
-            print(f"🎯 Processing SINGLE video: {args.input_video}")
-        else:
-            seqs = sorted(glob.glob(os.path.join(args.dataset_root, '*')))
-            print(f"📂 Processing DATASET: {len(seqs)} sequences")
-        
         generated_videos = []
+        os.makedirs(args.output_dir, exist_ok=True)
 
-        for seq in tqdm(seqs):
-            if not os.path.isdir(seq): continue
-            # Use folder name as filename, stripping trailing slash if present
-            seq_name = os.path.basename(seq.rstrip('/')) 
-            gt_path = os.path.join(seq, 'gt/gt.txt')
-            out_path = os.path.join(args.output_dir, f"{seq_name}_id_viz.mp4")
-            
-            process_sequence(seq, gt_path, out_path, model, device, args)
-            
-            if os.path.exists(out_path):
-                generated_videos.append(out_path)
+        if args.html_only:
+            print("⏩ HTML Only Mode: Skipping model loading and video generation.")
+            # Scan for existing mp4 files in output directory
+            existing_mp4s = sorted(glob.glob(os.path.join(args.output_dir, '*.mp4')))
+            generated_videos = existing_mp4s
+            print(f"   Found {len(generated_videos)} existing videos.")
+        else:
+            # Normal Mode: Load Model and Process
+            with open(args.config, 'r') as f: cfg = yaml.safe_load(f)
+            if "SUPER_CONFIG_PATH" in cfg:
+                with open(cfg["SUPER_CONFIG_PATH"], 'r') as f_base:
+                    base_cfg = yaml.safe_load(f_base)
+                base_cfg.update(cfg)
+                cfg = base_cfg
 
+            # Init Model
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            model = build_model(cfg)[0].to(device)
+            ckpt = torch.load(args.checkpoint, map_location='cpu')
+            model.load_state_dict(ckpt.get('model', ckpt), strict=False)
+            model.eval()
+
+            # Input Logic
+            if args.input_video:
+                if not os.path.exists(args.input_video):
+                    print(f"❌ Error: Input path not found: {args.input_video}")
+                    sys.exit(1)
+                seqs = [args.input_video]
+                print(f"🎯 Processing SINGLE video: {args.input_video}")
+            else:
+                seqs = sorted(glob.glob(os.path.join(args.dataset_root, '*')))
+                print(f"📂 Processing DATASET: {len(seqs)} sequences")
+            
+            for seq in tqdm(seqs):
+                if not os.path.isdir(seq): continue
+                # Use folder name as filename, stripping trailing slash if present
+                seq_name = os.path.basename(seq.rstrip('/')) 
+                gt_path = os.path.join(seq, 'gt/gt.txt')
+                out_path = os.path.join(args.output_dir, f"{seq_name}_id_viz.mp4")
+                
+                process_sequence(seq, gt_path, out_path, model, device, args)
+                
+                if os.path.exists(out_path):
+                    generated_videos.append(out_path)
+
+        # Common Steps (Always Run)
         # 1. Try to copy train.png
-        metrics_found = copy_training_metrics(args.checkpoint, args.output_dir)
+        copy_training_metrics(args.checkpoint, args.output_dir)
 
-        # Final Step: Generate Viewer
-        # We pass metrics_found flag to generation function
-        if generated_videos or metrics_found:
-            generate_html_viewer(args.output_dir, generated_videos, metrics_found, args.html_template)
+        # 2. Generate Viewer
+        if generated_videos or args.html_only:
+            generate_html_viewer(args.output_dir, generated_videos, args.html_template)
         else:
             print("⚠️ No videos generated. Check dataset path.")
 
