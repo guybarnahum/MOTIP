@@ -192,11 +192,14 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args):
             cv2.putText(frame, text, (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
         # Legend
-        cv2.rectangle(frame, (5, 5), (250, 105), (0,0,0), -1)
+        # Expanded box height to fit the score threshold line
+        cv2.rectangle(frame, (5, 5), (250, 130), (0,0,0), -1)
         cv2.putText(frame, "Green: Stable Match", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
         cv2.putText(frame, "Orange: ID SWITCH", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
         cv2.putText(frame, "Red Box: False Pos", (10, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
         cv2.putText(frame, "Blue: Missed GT", (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+        # Added Score Threshold display
+        cv2.putText(frame, f"Score Thresh: {args.score_thresh}", (10, 125), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
         out.write(frame)
         frame_idx += 1
@@ -210,7 +213,33 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args):
         if os.path.exists(output_path):
             os.remove(temp_out)
 
-def generate_html_viewer(output_dir, video_files, template_path="viewer_template.html"):
+def copy_training_metrics(checkpoint_path, output_dir):
+    """
+    Looks for 'train.png' in the same folder as the checkpoint and copies it to output_dir.
+    Returns True if found and copied, False otherwise.
+    """
+    ckpt_dir = os.path.dirname(checkpoint_path)
+    # Common names for training plots
+    potential_names = ['train.png', 'loss.png', 'metrics.png']
+    
+    found_path = None
+    for name in potential_names:
+        p = os.path.join(ckpt_dir, name)
+        if os.path.exists(p):
+            found_path = p
+            break
+            
+    if found_path:
+        print(f"📊 Found training metrics: {found_path}")
+        dest = os.path.join(output_dir, "train.png")
+        shutil.copy(found_path, dest)
+        return True
+    else:
+        # Only print a warning if metrics are missing
+        # print("⚠️  No 'train.png' found in checkpoint directory.")
+        return False
+
+def generate_html_viewer(output_dir, video_files, has_metrics=False, template_path="viz_viewer.html"):
     """Generates the viewer by creating video_data.js and copying the HTML template."""
     print(f"📝 Generating Portable HTML viewer for {len(video_files)} videos...")
     
@@ -218,10 +247,12 @@ def generate_html_viewer(output_dir, video_files, template_path="viewer_template
     # Users can SCP the output_dir and it will still work locally.
     filenames = [os.path.basename(f) for f in video_files]
     
-    # 1. Write Data JS
+    # 1. Write Data JS with metrics flag
     js_path = os.path.join(output_dir, "video_data.js")
     with open(js_path, "w", encoding="utf-8") as f:
-        f.write(f"const videoList = {json.dumps(filenames, indent=2)};")
+        # We pass hasMetrics as a boolean so the JS knows whether to show the tab
+        f.write(f"const videoList = {json.dumps(filenames, indent=2)};\n")
+        f.write(f"const hasMetrics = {str(has_metrics).lower()};\n")
 
     # 2. Copy Template to index.html
     dest_path = os.path.join(output_dir, "index.html")
@@ -233,7 +264,7 @@ def generate_html_viewer(output_dir, video_files, template_path="viewer_template
         print(f"   To view: cd {output_dir} && python -m http.server")
     else:
         print(f"⚠️  Template file '{template_path}' not found! Generated only data JS.")
-        print(f"   Please place 'viewer_template.html' in the working directory.")
+        print(f"   Please place 'viz_viewer.html' in the working directory.")
 
 # -------------------------------------------------------------------------
 # CLI
@@ -259,7 +290,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='./configs/pretrain_r50_deformable_detr_bdd_mini.yaml')
     parser.add_argument('--checkpoint', type=str, required=True)
-    parser.add_argument('--dataset_root', type=str, default='./datasets/DanceTrack/val')
+    
+    # Input Modes
+    parser.add_argument('--dataset_root', type=str, default='./datasets/DanceTrack/val',
+                        help="Path to a folder containing multiple sequences")
+    parser.add_argument('--input_video', type=str, default=None,
+                        help="Path to a SINGLE specific sequence directory (overrides dataset_root)")
+    
     parser.add_argument('--output_dir', type=str, default='./outputs/stage1_id_viz')
     parser.add_argument('--score_thresh', type=float, default=0.4)
     # New argument to specify template location if needed
@@ -284,13 +321,24 @@ if __name__ == "__main__":
         model.eval()
 
         os.makedirs(args.output_dir, exist_ok=True)
-        seqs = sorted(glob.glob(os.path.join(args.dataset_root, '*')))
+        
+        # --- Logic: Single Video vs Dataset ---
+        if args.input_video:
+            if not os.path.exists(args.input_video):
+                print(f"❌ Error: Input path not found: {args.input_video}")
+                sys.exit(1)
+            seqs = [args.input_video]
+            print(f"🎯 Processing SINGLE video: {args.input_video}")
+        else:
+            seqs = sorted(glob.glob(os.path.join(args.dataset_root, '*')))
+            print(f"📂 Processing DATASET: {len(seqs)} sequences")
         
         generated_videos = []
 
         for seq in tqdm(seqs):
             if not os.path.isdir(seq): continue
-            seq_name = os.path.basename(seq)
+            # Use folder name as filename, stripping trailing slash if present
+            seq_name = os.path.basename(seq.rstrip('/')) 
             gt_path = os.path.join(seq, 'gt/gt.txt')
             out_path = os.path.join(args.output_dir, f"{seq_name}_id_viz.mp4")
             
@@ -299,9 +347,13 @@ if __name__ == "__main__":
             if os.path.exists(out_path):
                 generated_videos.append(out_path)
 
+        # 1. Try to copy train.png
+        metrics_found = copy_training_metrics(args.checkpoint, args.output_dir)
+
         # Final Step: Generate Viewer
-        if generated_videos:
-            generate_html_viewer(args.output_dir, generated_videos, args.html_template)
+        # We pass metrics_found flag to generation function
+        if generated_videos or metrics_found:
+            generate_html_viewer(args.output_dir, generated_videos, metrics_found, args.html_template)
         else:
             print("⚠️ No videos generated. Check dataset path.")
 

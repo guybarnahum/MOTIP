@@ -78,7 +78,7 @@ python viz_val.py \
   --checkpoint "$CKPT" \
   --dataset_root "$VAL_DATASET" \
   --output_dir "$VIZ_OUT" \
-  --score_thresh 0.4
+  --score_thresh 0.65
 
 echo "========================================================"
 echo "✅ Analysis Complete!"

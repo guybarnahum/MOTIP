@@ -64,6 +64,14 @@
             margin: 0;
             list-style: none;
         }
+        .section-header {
+            padding: 10px 20px;
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            color: var(--muted-color);
+            letter-spacing: 1px;
+            margin-top: 10px;
+        }
         .video-item {
             padding: 15px 20px;
             cursor: pointer;
@@ -83,7 +91,15 @@
             color: var(--muted-color);
             font-style: italic;
         }
-        .video-item.empty:hover { background-color: transparent; }
+        
+        /* Special style for Metrics item */
+        .metrics-item {
+            border-top: 1px solid #333;
+            margin-top: auto; /* Push to bottom if flex permits, or just separate */
+            color: #4ade80; /* Greenish */
+        }
+        .metrics-item:hover { background-color: #14532d; }
+        .metrics-item.active { background-color: #166534; color: white; }
 
         /* --- Main Content --- */
         #main {
@@ -94,11 +110,12 @@
             align-items: center;
             position: relative;
             background: #000;
+            overflow: hidden;
         }
 
         /* --- Video Player Mode --- */
         #player-container {
-            display: none; /* Hidden by default */
+            display: none;
             flex-direction: column;
             align-items: center;
             width: 100%;
@@ -128,9 +145,28 @@
             font-size: 0.9rem;
         }
 
+        /* --- Metrics Mode --- */
+        #metrics-view {
+            display: none;
+            width: 100%;
+            height: 100%;
+            overflow: auto; /* Allow scrolling if image is tall */
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+            box-sizing: border-box;
+            background-color: #1a1a1a;
+        }
+        #metrics-img {
+            max-width: 95%;
+            height: auto;
+            border-radius: 8px;
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+        }
+
         /* --- Empty State Mode --- */
         #empty-state {
-            display: none; /* Hidden by default */
+            display: none;
             flex-direction: column;
             align-items: center;
             justify-content: center;
@@ -144,16 +180,8 @@
             margin-bottom: 20px;
             color: #444;
         }
-        .empty-title {
-            font-size: 1.5rem;
-            margin-bottom: 10px;
-            color: var(--text-color);
-        }
-        .empty-desc {
-            color: var(--muted-color);
-            line-height: 1.6;
-            margin-bottom: 25px;
-        }
+        .empty-title { font-size: 1.5rem; margin-bottom: 10px; color: var(--text-color); }
+        .empty-desc { color: var(--muted-color); line-height: 1.6; margin-bottom: 25px; }
         .code-block {
             background-color: var(--code-bg);
             padding: 15px;
@@ -175,8 +203,12 @@
         <div class="title">MOTIP Inspector</div>
         <button class="refresh-btn" onclick="location.reload()" title="Refresh Video List">↻</button>
     </div>
-    <ul id="video-list">
-        </ul>
+    
+    <div class="section-header">Recordings</div>
+    <ul id="video-list"></ul>
+
+    <ul id="metrics-list" style="padding:0; margin:0; list-style:none;">
+    </ul>
 </div>
 
 <div id="main">
@@ -189,6 +221,14 @@
         <div class="controls-hint">Use ⬆ ⬇ arrow keys to navigate</div>
     </div>
 
+    <div id="metrics-view">
+        <img id="metrics-img" src="" alt="Training Metrics">
+        <div id="no-metrics-msg" style="display:none; text-align:center;">
+            <div class="empty-title">Metrics File Missing</div>
+            <div class="empty-desc">Could not find <code>train.png</code> in the output folder.</div>
+        </div>
+    </div>
+
     <div id="empty-state">
         <svg class="icon-box" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M5 19a2 2 0 01-2-2V7a2 2 0 012-2h4l2 2h4a2 2 0 012 2v1M5 19h14a2 2 0 002-2v-5a2 2 0 00-2-2H9a2 2 0 00-2 2v5a2 2 0 01-2 2z"></path>
@@ -196,10 +236,10 @@
         <div class="empty-title">No Visualizations Found</div>
         <div class="empty-desc">
             The target folder is empty. The viewer could not find any <code>.mp4</code> files to playback.
-        </div>
-        <div class="code-block">
-            # Generate visualizations first:<br>
-            python viz_val.py --checkpoint outputs/...
+            <div class="code-block">
+                # Generate visualizations first:<br>
+                python viz_val.py --checkpoint outputs/...
+            </div>
         </div>
     </div>
 
@@ -208,64 +248,75 @@
 <script src="video_data.js"></script>
 
 <script>
-    // --- Logic ---
+    // --- Data Safety ---
     const videos = (typeof videoList !== 'undefined') ? videoList : [];
+    const showMetrics = (typeof hasMetrics !== 'undefined') ? hasMetrics : false;
     
+    // --- Elements ---
     const playerContainer = document.getElementById('player-container');
+    const metricsView = document.getElementById('metrics-view');
     const emptyState = document.getElementById('empty-state');
     const listEl = document.getElementById('video-list');
+    const metricsListEl = document.getElementById('metrics-list');
+    
     const player = document.getElementById('player');
     const source = player.querySelector('source');
     const label = document.getElementById('current-label');
+    const metricsImg = document.getElementById('metrics-img');
+    const noMetricsMsg = document.getElementById('no-metrics-msg');
     
-    let currentIndex = -1;
+    let currentIndex = -1; // -1 means nothing or metrics selected
 
     function init() {
+        renderSidebar();
+
         if (videos.length > 0) {
-            // Show Player
-            playerContainer.style.display = 'flex';
-            emptyState.style.display = 'none';
-            renderList();
             loadVideo(0);
+        } else if (showMetrics) {
+            loadMetrics();
         } else {
-            // Show Empty State
-            playerContainer.style.display = 'none';
-            emptyState.style.display = 'flex';
-            renderEmptySidebar();
+            showEmptyState();
         }
     }
 
-    function renderEmptySidebar() {
-        listEl.innerHTML = `
-            <li class="video-item empty">
-                <span>0 Videos found</span>
-            </li>
-            <li class="video-item empty" style="font-size: 0.8rem; border: none;">
-                <span>Check directory path</span>
-            </li>
-        `;
-    }
-
-    function renderList() {
+    function renderSidebar() {
+        // Render Videos
         listEl.innerHTML = '';
-        videos.forEach((vid, idx) => {
+        if (videos.length === 0) {
+            listEl.innerHTML = `<li class="video-item empty"><span>0 Videos found</span></li>`;
+        } else {
+            videos.forEach((vid, idx) => {
+                const li = document.createElement('li');
+                li.className = 'video-item';
+                li.innerHTML = `<span class="video-name">${vid}</span>`;
+                li.onclick = () => loadVideo(idx);
+                listEl.appendChild(li);
+            });
+        }
+
+        // Render Metrics Button
+        metricsListEl.innerHTML = '';
+        if (showMetrics) {
             const li = document.createElement('li');
-            li.className = 'video-item';
-            li.innerHTML = `<span class="video-name">${vid}</span>`;
-            li.onclick = () => loadVideo(idx);
-            listEl.appendChild(li);
-        });
+            li.className = 'video-item metrics-item';
+            li.innerHTML = `<span>📊 Training Metrics</span>`;
+            li.onclick = () => loadMetrics();
+            metricsListEl.appendChild(li);
+        }
     }
 
     function loadVideo(index) {
         if (index < 0 || index >= videos.length) return;
         
-        // Update Sidebar UI
-        const items = document.querySelectorAll('.video-item');
-        items.forEach(el => el.classList.remove('active'));
-        if (items[index]) items[index].classList.add('active');
+        // UI State
+        playerContainer.style.display = 'flex';
+        metricsView.style.display = 'none';
+        emptyState.style.display = 'none';
         
-        // Update Player
+        // Highlight Sidebar
+        updateActiveItem(index, 'video');
+        
+        // Load Video
         const filename = videos[index];
         source.src = filename;
         player.load();
@@ -273,14 +324,53 @@
         
         label.innerText = filename;
         currentIndex = index;
-        
-        // Scroll sidebar
-        if (items[index]) items[index].scrollIntoView({behavior: "smooth", block: "center"});
     }
 
-    // Keyboard
+    function loadMetrics() {
+        // UI State
+        playerContainer.style.display = 'none';
+        metricsView.style.display = 'flex';
+        emptyState.style.display = 'none';
+        player.pause();
+
+        // Highlight Sidebar
+        updateActiveItem(-1, 'metrics');
+
+        // Load Image
+        metricsImg.src = 'train.png';
+        metricsImg.onerror = () => {
+            metricsImg.style.display = 'none';
+            noMetricsMsg.style.display = 'block';
+        };
+        currentIndex = -1;
+    }
+
+    function showEmptyState() {
+        playerContainer.style.display = 'none';
+        metricsView.style.display = 'none';
+        emptyState.style.display = 'flex';
+    }
+
+    function updateActiveItem(index, type) {
+        // Clear all active
+        document.querySelectorAll('.video-item').forEach(el => el.classList.remove('active'));
+        
+        if (type === 'video') {
+            const items = listEl.querySelectorAll('.video-item');
+            if (items[index]) {
+                items[index].classList.add('active');
+                items[index].scrollIntoView({behavior: "smooth", block: "nearest"});
+            }
+        } else if (type === 'metrics') {
+            const mItem = metricsListEl.querySelector('.metrics-item');
+            if (mItem) mItem.classList.add('active');
+        }
+    }
+
+    // Keyboard Navigation
     document.addEventListener('keydown', (e) => {
-        if (videos.length === 0) return;
+        // Only navigate if we are in video mode (currentIndex != -1)
+        if (currentIndex === -1 || videos.length === 0) return;
 
         if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {
             e.preventDefault();
@@ -294,9 +384,7 @@
         }
     });
 
-    // Run
     init();
-
 </script>
 </body>
 </html>
