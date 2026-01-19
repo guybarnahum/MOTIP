@@ -1,5 +1,4 @@
 #!/bin/bash
-
 # Usage: ./train-post.sh <CONFIG_PATH> <OUTPUT_ROOT> <LOG_FILE>
 
 if [ "$#" -ne 3 ]; then
