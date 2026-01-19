@@ -129,6 +129,7 @@
             box-shadow: 0 0 30px rgba(0,0,0,0.6);
             outline: none;
             border-radius: 4px;
+            cursor: pointer; /* Suggest clickable */
         }
         #current-label {
             position: absolute;
@@ -153,7 +154,7 @@
             height: 100%;
             overflow: auto;
             justify-content: center;
-            align-items: flex-start; /* Align top for long images */
+            align-items: flex-start; 
             padding: 20px;
             box-sizing: border-box;
             background-color: #1a1a1a;
@@ -219,7 +220,7 @@
         <video id="player" controls autoplay loop>
             <source src="" type="video/mp4">
         </video>
-        <div class="controls-hint">Use ⬆ ⬇ arrow keys to navigate</div>
+        <div class="controls-hint">⬇⬆ for videos • ⮕⬅ for frames • Space to toggle</div>
     </div>
 
     <div id="metrics-view">
@@ -267,8 +268,6 @@
 
     function init() {
         renderVideoList();
-        
-        // Dynamic Logic: Probe for metrics image
         detectMetricsImage();
 
         if (videos.length > 0) {
@@ -278,18 +277,24 @@
         }
     }
 
-    // --- Dynamic Detection ---
+    // --- Interaction Logic ---
+    
+    // Click video to toggle play/pause
+    player.addEventListener('click', (e) => {
+        // Don't toggle if clicking controls
+        if (e.target !== player) return;
+        
+        if (player.paused) {
+            player.play();
+        } else {
+            player.pause();
+        }
+    });
+
     function detectMetricsImage() {
         const imgProbe = new Image();
-        imgProbe.onload = function() {
-            // Success: Image exists on server/disk
-            addMetricsButton();
-        };
-        imgProbe.onerror = function() {
-            // Failure: Do nothing
-            console.log("No train.png found dynamically.");
-        };
-        // Add timestamp to prevent browser caching if file is added later
+        imgProbe.onload = function() { addMetricsButton(); };
+        imgProbe.onerror = function() { console.log("No train.png found dynamically."); };
         imgProbe.src = 'train.png?' + new Date().getTime();
     }
 
@@ -327,9 +332,13 @@
         updateActiveItem(index, 'video');
         
         const filename = videos[index];
-        source.src = filename;
-        player.load();
-        player.play();
+        // Only reload if source changed to avoid flicker
+        const newSrc = filename;
+        if (source.getAttribute('src') !== newSrc) {
+            source.src = newSrc;
+            player.load();
+            player.play();
+        }
         
         label.innerText = filename;
         currentIndex = index;
@@ -342,8 +351,6 @@
         player.pause();
 
         updateActiveItem(-1, 'metrics');
-
-        // Reload image with cache bust to ensure newest copy is shown
         metricsImg.src = 'train.png?' + new Date().getTime();
         currentIndex = -1;
     }
@@ -369,19 +376,35 @@
         }
     }
 
-    // Keyboard Navigation
+    // --- Keyboard Scrubbing & Navigation ---
     document.addEventListener('keydown', (e) => {
         if (currentIndex === -1 || videos.length === 0) return;
 
-        if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {
-            e.preventDefault();
-            loadVideo((currentIndex + 1) % videos.length);
-        } else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
-            e.preventDefault();
-            loadVideo((currentIndex - 1 + videos.length) % videos.length);
-        } else if (e.key === ' ') {
-            e.preventDefault();
-            player.paused ? player.play() : player.pause();
+        const FRAME_TIME = 1 / 10; // Approx 10fps
+
+        switch(e.key) {
+            case 'ArrowDown':
+                e.preventDefault();
+                loadVideo((currentIndex + 1) % videos.length);
+                break;
+            case 'ArrowUp':
+                e.preventDefault();
+                loadVideo((currentIndex - 1 + videos.length) % videos.length);
+                break;
+            case 'ArrowRight':
+                e.preventDefault();
+                player.pause(); // Pause to inspect
+                player.currentTime = Math.min(player.duration, player.currentTime + FRAME_TIME);
+                break;
+            case 'ArrowLeft':
+                e.preventDefault();
+                player.pause(); // Pause to inspect
+                player.currentTime = Math.max(0, player.currentTime - FRAME_TIME);
+                break;
+            case ' ':
+                e.preventDefault();
+                player.paused ? player.play() : player.pause();
+                break;
         }
     });
 
