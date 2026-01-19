@@ -212,8 +212,10 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args):
 
 def generate_html_viewer(output_dir, video_files, template_path="viewer_template.html"):
     """Generates the viewer by creating video_data.js and copying the HTML template."""
-    print(f"📝 Generating HTML viewer for {len(video_files)} videos...")
+    print(f"📝 Generating Portable HTML viewer for {len(video_files)} videos...")
     
+    # [IMPORTANT] extracting basename makes this portable!
+    # Users can SCP the output_dir and it will still work locally.
     filenames = [os.path.basename(f) for f in video_files]
     
     # 1. Write Data JS
@@ -251,6 +253,7 @@ if __name__ == "__main__":
             torch.cuda.set_per_process_memory_fraction(SAFETY_LIMIT, 0)
         except RuntimeError:
             print("⚠️ Warning: Could not set memory limit (CUDA already initialized?)")
+            print("❌ CRITICAL SAFETY ERROR: Aborting to protect active training run.")
             sys.exit(1)
             
     parser = argparse.ArgumentParser()
@@ -306,10 +309,10 @@ if __name__ == "__main__":
         print("\n" + "🟥"*32)
         print("VRAM SAFETY FUSE BLOWN")
         print("🟥"*32)
-        print(f"The script probbaly hit the {SAFETY_LIMIT*100:.0f}% memory limit and stopped itself.")
+        print(f"The script probably hit the {SAFETY_LIMIT*100:.0f}% memory limit and stopped itself.")
         print("\n✅ GOOD NEWS: any training run or other GPU work are SAFE.")
         print("❌ BAD NEWS: Visualization could not finish.")
-        print("👉 ACTION: Wait for GPU availabiliy and run again.")
+        print("👉 ACTION: Wait for GPU availability and run again.")
         print("="*64 + "\n")
         sys.exit(1)
         
