@@ -376,12 +376,6 @@ class MotChallenge2DBox(_BaseDataset):
             tracker_confidences = raw_data['tracker_confidences'][t]
             similarity_scores = raw_data['similarity_scores'][t]
 
-            # Evaluation is ONLY valid for pedestrian class
-            if len(tracker_classes) > 0 and np.max(tracker_classes) > 1:
-                raise TrackEvalException(
-                    'Evaluation is only valid for pedestrian class. Non pedestrian class (%i) found in sequence %s at '
-                    'timestep %i.' % (np.max(tracker_classes), raw_data['seq'], t))
-
             # Match tracker and gt dets (with hungarian algorithm) and remove tracker dets which match with gt dets
             # which are labeled as belonging to a distractor class.
             to_remove_tracker = np.array([], np.int32)
