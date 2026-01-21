@@ -10,7 +10,7 @@ import warnings
 import types
 
 # Custom Modules
-from utils_inference import convert_to_h264, recover_embeddings
+from utils_inference import convert_to_h264
 from utils_display import Annotator  # <--- NEW: Import Annotator
 from models.motip import build as build_model
 from models.runtime_tracker import RuntimeTracker
@@ -18,19 +18,6 @@ from models.longterm_memory import LongTermMemory
 
 warnings.filterwarnings("ignore")
 sys.path.append(os.getcwd())
-
-# -------------------------------------------------------------------------
-# MONKEY PATCH: Enable Memory without editing runtime_tracker.py
-# -------------------------------------------------------------------------
-original_get_activate_detections = RuntimeTracker._get_activate_detections
-
-def patched_get_activate_detections(self, detr_out):
-    self.output = detr_out # Save raw output
-    return original_get_activate_detections(self, detr_out)
-
-RuntimeTracker._get_activate_detections = patched_get_activate_detections
-print("🔧 RuntimeTracker patched successfully for Long-Term Memory support.")
-# -------------------------------------------------------------------------
 
 def get_args():
     parser = argparse.ArgumentParser("MOTIP + Memory")
@@ -175,11 +162,12 @@ def main():
             valid_boxes = res['bbox'].cpu().float().numpy() # [N, 4]
             valid_ids = res['id'].tolist()                  # [N]
             
-            active_embeds = recover_embeddings(tracker, res['bbox'], W, H, device)
+            # Directly retrieve embeddings (No helper needed anymore)
+            active_embeds = res.get('embeddings', None)
 
             # --- C. MEMORY UPDATE ---
             final_ids = []
-            if active_embeds is not None:
+            if active_embeds is not None and len(valid_ids) > 0:
                 id_map = memory.update(frame_idx, valid_ids, active_embeds)
                 # Map the IDs: If map exists use it, else use original ID
                 final_ids = [id_map.get(vid, vid) for vid in valid_ids]
