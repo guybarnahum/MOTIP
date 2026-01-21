@@ -1,0 +1,76 @@
+# configs/stage1_universal_foundation.yaml
+
+# ------------------------------------------------------------------------
+# STAGE 1: UNIVERSAL FOUNDATION (Cars + People)
+# Goal: Learn "Vehicle" class without forgetting "Person"
+# ------------------------------------------------------------------------
+
+# Base Architecture (Inherit from DanceTrack)
+SUPER_CONFIG_PATH: ./configs/r50_deformable_detr_motip_dancetrack.yaml
+root_path: "."
+
+# Dataset & Classes
+# ⚠️ CRITICAL: Set to 2 to support both People (1) and Vehicles (2)
+NUM_CLASSES: 2
+
+# Weights Initialization
+# Start from the strong Person tracker (DanceTrack weights)
+# We do NOT resume optimizer/scheduler because we are modifying the architecture (Classes 1 -> 2)
+DETR_PRETRAIN: ./pretrains/motip_dancetrack.pth
+RESUME_OPTIMIZER: False
+RESUME_SCHEDULER: False
+
+# ------------------------------------------------------------------------
+# Training Strategy
+# ------------------------------------------------------------------------
+EPOCHS: 10
+LR: 2.0e-5          # Standard transfer learning rate
+LR_DROP: 7          # # Drop at 7 gives 3 full epochs of fine-grained optimization (30% of training)
+LR_BACKBONE: 2.0e-6
+LR_WARMUP_EPOCHS: 0
+
+# Sampling Strategy
+# We use 5 frames per clip to learn robust short-term motion.
+# Intervals [2, 3] simulate faster movement (skipping frames).
+sampler_lengths: [5]
+sample_intervals: [2, 3]
+
+# ------------------------------------------------------------------------
+# Hardware Safety (A10G / 24GB VRAM)
+# ------------------------------------------------------------------------
+BATCH_SIZE: 1
+ACCUMULATE_STEPS: 4       # Effective Batch Size = 4 (1 * 4)
+NUM_WORKERS: 4
+
+# Global flags to enable aggressive memory saving techniques
+MEMORY_EFFICIENT: True
+USE_DECODER_CHECKPOINT: True
+
+# Image Resolution Limits (Memory Safety)
+# Force max side to 1000px (standard is 1333px, which OOMs on 24GB with these settings)
+AUG_MAX_SIZE: 1000
+
+# Resize scales: Smaller short-side to keep tensor size manageable
+AUG_RESIZE_SCALES: [480, 512, 544, 576, 608, 640]
+AUG_RANDOM_RESIZE: [400, 500, 600]
+
+# Output Directories (Handled automatically by script timestamping)
+OUTPUT_DIR: null
+OUTPUTS_DIR: null
+
+# ------------------------------------------------------------------------
+# Validation Config (Monitor Regression & Learning)
+# ------------------------------------------------------------------------
+# Points to the symlinked 'universal' dataset which contains both BDD and DT val sets
+val_config:
+  GT_FOLDER: "./datasets/DanceTrack/val"
+  SEQMAP_FILE: "./datasets/DanceTrack/val_seqmap.txt"
+  SPLIT_TO_EVAL: "val"
+  
+  # Evaluate BOTH classes to see:
+  # 1. Are we learning cars? (MOTA/Recall for Class 2)
+  # 2. Are we forgetting people? (IDF1 for Class 1)
+  CLASSES_TO_EVAL: ['pedestrian', 'car'] 
+  CLASS_NAME_TO_ID: 
+    pedestrian: 1
+    car: 2
