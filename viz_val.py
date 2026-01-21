@@ -13,11 +13,11 @@ from scipy.optimize import linear_sum_assignment
 from tqdm import tqdm
 
 # Import your existing modules
-from memory_manager import LongTermMemory
 from utils_inference import recover_embeddings
 # models.motip imports torch, but VRAM alloc only happens on .to(device) or inference
 from models.motip import build as build_model
 from models.runtime_tracker import RuntimeTracker
+from models.longterm_memory import LongTermMemory
 
 # -------------------------------------------------------------------------
 # Monkey Patch

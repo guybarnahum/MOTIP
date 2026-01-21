@@ -10,11 +10,11 @@ import warnings
 import types
 
 # Custom Modules
-from memory_manager import LongTermMemory
 from utils_inference import convert_to_h264, recover_embeddings
 from utils_display import Annotator  # <--- NEW: Import Annotator
 from models.motip import build as build_model
 from models.runtime_tracker import RuntimeTracker
+from models.longterm_memory import LongTermMemory
 
 warnings.filterwarnings("ignore")
 sys.path.append(os.getcwd())

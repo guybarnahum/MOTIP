@@ -149,6 +149,7 @@ class RuntimeTracker:
             "id": torch.tensor(
                 [self.id_label_to_id[_] for _ in id_labels.tolist()], dtype=torch.int64,
             ),
+            "embeddings": output_embeds 
         }
 
         # Update id_queue:
