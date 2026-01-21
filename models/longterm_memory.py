@@ -4,10 +4,11 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 
 class LongTermMemory:
-    def __init__(self, patience=9000, gallery_size=5, similarity_thresh=0.85):
+    def __init__(self, patience=9000, gallery_size=5, similarity_thresh=0.85, decay_rate=0.1):
         self.patience = patience
         self.gallery_size = gallery_size
         self.similarity_thresh = similarity_thresh # Raised threshold for safety
+        self.decay_rate = decay_rate  # Max penalty percentage at patience limit
         
         # storage[global_uuid] = {'gallery': [tensor...], 'last_seen': frame_idx}
         self.storage = {} 
@@ -60,12 +61,15 @@ class LongTermMemory:
         
         lost_uuids = []
         gallery_stack = []
+        time_deltas = [] # Store age for decay calculation
         
         for uuid, data in self.storage.items():
             if uuid in active_uuids: continue
             
+            delta_t = frame_idx - data['last_seen']
+
             # Don't revive if it died very recently (flicker protection)
-            if (frame_idx - data['last_seen']) < 5: continue
+            if delta_t < 5: continue
 
             # Use the single most recent feature (or average) for speed
             # Or use stack if you want max-similarity
@@ -73,6 +77,9 @@ class LongTermMemory:
             snaps = data['gallery']
             gallery_stack.extend(snaps)
             lost_uuids.extend([uuid] * len(snaps))
+            
+            # Record age for each snapshot
+            time_deltas.extend([delta_t] * len(snaps))
 
         if len(gallery_stack) == 0:
             # No history to match against. All newborns are truly new.
@@ -90,9 +97,20 @@ class LongTermMemory:
         # Similarity Matrix (Cosine)
         sim_matrix = torch.mm(newborn_feats, gallery_tensor.t()) # (Num_New, Num_Gal)
         
+        # --- Apply Temporal Decay ---
+        # Factor = 1.0 - (decay_rate * (delta_t / patience))
+        age_tensor = torch.tensor(time_deltas, device=newborn_feats.device).float()
+        decay_factors = 1.0 - (self.decay_rate * (age_tensor / self.patience))
+        
+        # Clamp to ensure we don't go negative or create weird boosts (keep between 0.5 and 1.0)
+        decay_factors = torch.clamp(decay_factors, min=0.5, max=1.0)
+        
+        # Broadcast Multiply: (Num_New, Num_Gal) * (1, Num_Gal)
+        weighted_sim_matrix = sim_matrix * decay_factors.unsqueeze(0)
+        
         # Convert to Cost Matrix for Hungarian (minimize cost)
-        # Cost = 1 - Similarity
-        cost_matrix = 1.0 - sim_matrix.cpu().numpy()
+        # Cost = 1 - Weighted Similarity
+        cost_matrix = 1.0 - weighted_sim_matrix.cpu().numpy()
         
         # 3. Hungarian Algorithm (1-to-1 Matching)
         # row_idx refers to newborn_indices[row_idx]
@@ -102,7 +120,8 @@ class LongTermMemory:
         assigned_newborn_local_indices = set()
 
         for r, c in zip(row_indices, col_indices):
-            similarity = sim_matrix[r, c].item()
+            # Check weighted similarity
+            similarity = weighted_sim_matrix[r, c].item()
             
             if similarity > self.similarity_thresh:
                 # MATCH FOUND!
