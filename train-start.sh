@@ -58,7 +58,7 @@ TRAIN_CMD="PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True accelerate launch --
 POST_CMD="./train-post.sh $CONFIG_PATH $OUTPUT_ROOT $LOG_FILE"
 
 # Combined Command
-FINAL_CMD="$TRAIN_CMD 2>&1 | tee $LOG_FILE; $POST_CMD; read -p 'Press Enter to close session...'"
+FINAL_CMD="$TRAIN_CMD 2>&1 | tee $LOG_FILE; $POST_CMD"
 
 # --- 4. Launch ---
 tmux new-session -d -s "$SESSION_NAME"
