@@ -73,7 +73,7 @@ echo "🎥 Running Visualization on: $VAL_DATASET"
 VIZ_OUT="${OUTPUT_ROOT}/viz_val"
 mkdir -p "$VIZ_OUT"
 
-python viz_val.py \
+python viz.py \
   --config "$CONFIG_PATH" \
   --checkpoint "$CKPT" \
   --dataset_root "$VAL_DATASET" \

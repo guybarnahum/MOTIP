@@ -14,19 +14,15 @@ from tqdm import tqdm
 
 # Import your existing modules
 from utils_inference import recover_embeddings
-# models.motip imports torch, but VRAM alloc only happens on .to(device) or inference
 from models.motip import build as build_model
 from models.runtime_tracker import RuntimeTracker
-from models.longterm_memory import LongTermMemory
 
-# -------------------------------------------------------------------------
-# Monkey Patch
-# -------------------------------------------------------------------------
-original_get_activate_detections = RuntimeTracker._get_activate_detections
-def patched_get_activate_detections(self, detr_out):
-    self.output = detr_out
-    return original_get_activate_detections(self, detr_out)
-RuntimeTracker._get_activate_detections = patched_get_activate_detections
+# --- Import Memory Manager ---
+try:
+    from models.longterm_memory import LongTermMemory
+except ImportError:
+    print("⚠️ Warning: models/longterm_memory.py not found. Viz will skip Re-ID.")
+    LongTermMemory = None
 
 # -------------------------------------------------------------------------
 # Helper: Ground Truth Parsing
@@ -122,6 +118,11 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args):
     )
     tracker.bbox_unnorm = torch.tensor([W, H, W, H], device=device).float()
     
+    # 🧠 Initialize Memory for this specific sequence
+    memory = None
+    if LongTermMemory is not None:
+        memory = LongTermMemory(patience=900, gallery_size=5, similarity_thresh=0.85)
+
     gt_data = load_mot_gt(gt_path)
     
     # Temp file for OpenCV writing
@@ -150,6 +151,18 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args):
         tracker.update(img_norm)
         res = tracker.get_track_results()
         
+        # --- Memory Correction Logic ---
+        if memory is not None and "embeddings" in res:
+            raw_ids = res["id"].tolist()
+            if len(raw_ids) > 0:
+                # Update memory & get re-mapping
+                id_map = memory.update(frame_idx, raw_ids, res["embeddings"])
+                
+                # Remap IDs
+                remapped_ids = [id_map.get(rid, rid) for rid in raw_ids]
+                res["id"] = torch.tensor(remapped_ids, dtype=torch.int64, device=res["id"].device)
+        # -------------------------------
+
         raw_pred_boxes = res['bbox'].cpu().numpy()
         pred_ids = res['id'].tolist()
         pred_boxes = convert_tlwh_to_xyxy(raw_pred_boxes)

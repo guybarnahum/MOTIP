@@ -195,13 +195,13 @@ python plot_dashboard.py outputs/stage1_universal_foundation_TIMESTAMP/train.log
 * **Grad Norm:** Should be stable (not spiking to Infinity).
 
 ### 2. Qualitative Stress Test (Visual Viz)
-Use `viz_val.py` to render "Ground Truth vs Prediction" comparisons. This reveals if the model is ignoring people (Blue Boxes) or hallucinating cars (Red Boxes).
+Use `viz.py` to render "Ground Truth vs Prediction" comparisons. This reveals if the model is ignoring people (Blue Boxes) or hallucinating cars (Red Boxes).
 
 **When to run:** After training completes.
 
 ```bash
 # Example: Visualize Stage 1 results on DanceTrack Val
-python viz_val.py \
+python viz.py \
     --config configs/stage1_universal_foundation.yaml \
     --checkpoint outputs/stage1_universal_foundation_TIMESTAMP/checkpoint_best_idf1.pth \
     --dataset_root datasets/DanceTrack/val \
