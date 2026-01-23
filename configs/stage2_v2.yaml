@@ -1,0 +1,73 @@
+# configs/stage2_v2.yaml
+
+# ------------------------------------------------------------------------
+# STAGE 2: REFINEMENT & PRECISION (15k Frames)
+# Goal: Fix "Ghost Boxes" (Negative MOTA) and improve Detection Precision
+# ------------------------------------------------------------------------
+
+# Base Architecture (Inherit from DanceTrack)
+SUPER_CONFIG_PATH: ./configs/r50_deformable_detr_motip_dancetrack.yaml
+root_path: "."
+
+# Dataset & Classes
+# ⚠️ CRITICAL: Must remain 2. Do not change.
+NUM_CLASSES: 2
+
+# Weights Initialization
+# ⚠️ CRITICAL: Load the "Gold Master" weights from Stage 1
+# We use the specific output folder from your completed Stage 1 run.
+DETR_PRETRAIN: "pretrains/motip_stage1_v2.pth"
+
+# We reset the optimizer because the dataset size has tripled (5k -> 15k).
+# The gradients will look different, so we want fresh momentum buffers.
+RESUME_OPTIMIZER: False
+RESUME_SCHEDULER: False
+
+# ------------------------------------------------------------------------
+# Refinement Training Strategy
+# ------------------------------------------------------------------------
+EPOCHS: 10
+
+# Lower Learning Rate for Stability
+# Stage 1 used 2.0e-5. Stage 2 uses 1.0e-5 to polish without breaking.
+LR: 1.0e-5          
+LR_DROP: 7          # Drop at epoch 7 (same 70/30 split)
+LR_BACKBONE: 1.0e-6 # Extremely low backbone LR to preserve feature extraction
+
+LR_WARMUP_EPOCHS: 0
+
+# Sampling Strategy (Keep consistent with Stage 1)
+sampler_lengths: [5]
+sample_intervals: [2, 3]
+
+# ------------------------------------------------------------------------
+# Hardware Safety (A10G / 24GB VRAM) - Same as Stage 1
+# ------------------------------------------------------------------------
+BATCH_SIZE: 1
+ACCUMULATE_STEPS: 4       # Effective Batch Size = 4
+NUM_WORKERS: 4
+
+MEMORY_EFFICIENT: True
+USE_DECODER_CHECKPOINT: True
+
+# Image Resolution Limits (Memory Safety)
+AUG_MAX_SIZE: 1000
+AUG_RESIZE_SCALES: [480, 512, 544, 576, 608, 640]
+AUG_RANDOM_RESIZE: [400, 500, 600]
+
+# Output Directories (Handled automatically)
+OUTPUT_DIR: null
+OUTPUTS_DIR: null
+
+# ------------------------------------------------------------------------
+# Validation Config
+# ------------------------------------------------------------------------
+val_config:
+  GT_FOLDER: "./datasets/DanceTrack/val"
+  SEQMAP_FILE: "./datasets/DanceTrack/val_seqmap.txt"
+  SPLIT_TO_EVAL: "val"
+  
+  CLASSES_TO_EVAL: ['pedestrian', 'car'] 
+  CLASS_NAME_TO_ID: 
+    pedestrian: 1
+    car: 2
