@@ -1,4 +1,4 @@
-# TRAIN.md: Universal MOTIP Training Plan
+# TRAIN.md: MOTIP Training Plan
 
 We employ **Joint Training Strategy** designed to prevent catastrophic forgetting. Unlike the previous attempt—which flooded the model with cars and erased its person-tracking knowledge—this plan uses the **Frame Budget** system to maintain a balanced diet of "People" and "Vehicles" throughout all stages.
 
