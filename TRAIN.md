@@ -4,15 +4,15 @@ We employ **Joint Training Strategy** designed to prevent catastrophic forgettin
 
 ## 📋 Strategic Overview
 
-**Hardware Reality:** EC2 g5.2xlarge (A10G). Observed speed is **~1.9 hours/epoch** due to memory safety settings.
-**Strategy:** We utilize "sleeping compute" (overnight runs) with optimized epoch counts to ensure convergence without multi-day waits.
+**Hardware Reality:** EC2 g5.2xlarge (A10G). Observed speed is **~2.0 hours/epoch** (Stage 1) to **~6.5 hours/epoch** (Stage 2) due to dataset scaling.
+**Strategy:** We utilize "sleeping compute" (overnight/weekend runs) with optimized epoch counts to ensure convergence.
 **Cost Basis:** ~$1.212 / hr (On-Demand).
 
 | Phase | Stage | Dataset Mix (Frame Budget) | Epochs | Est. Time | Est. Cost | Goal |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **I** | **Universal-Foundation** | 50% BDD (Cars)<br>50% DanceTrack (People) | **10** | **~19 hrs** | ~$23.00 | Rapidly learn "Vehicle" class without forgetting "Person". |
-| **I** | **Universal-Refinement** | 50% BDD (Cars)<br>50% DanceTrack (People) | **10** | **~19 hrs** | ~$23.00 | Scale up volume for robust long-term association. |
-| **II** | **Aerial-Adaptation** | 70% VisDrone (Air)<br>30% DT/BDD (Replay) | **10** | **~19 hrs** | ~$23.00 | Adapt to aerial view while retaining ground object features. |
+| **I** | **Foundation** | 5k BDD (Cars)<br>5k DanceTrack (People) | **10** | **~20.5 hrs** | ~$25.00 | Rapidly learn "Vehicle" class without forgetting "Person". |
+| **II** | **Refinement** | 15k BDD (Cars)<br>15k DanceTrack (People) | **10** | **~65.0 hrs** | ~$79.00 | Scale up volume (3x) to fix "Ghost Boxes" and stabilize tracking. |
+| **III** | **Aerial-Adaptation** | 15k VisDrone (Air)<br>5k DT/BDD (Replay) | **10** | **~45.0 hrs** | ~$55.00 | Adapt to aerial view while retaining ground object features. |
 
 ---
 
@@ -111,7 +111,7 @@ Instead of showing the model 100% cars, we show it a 50/50 mix. This forces the 
     SUPER_CONFIG_PATH: ./configs/r50_deformable_detr_motip_dancetrack.yaml
     
     # Load Stage 1 Result
-    DETR_PRETRAIN: "outputs/stage1_timestamp/checkpoint_best_idf1.pth"
+    DETR_PRETRAIN: "./pretrains/stage1_v2.pth"
     RESUME_OPTIMIZER: False
 
     NUM_CLASSES: 2
@@ -155,7 +155,7 @@ If we switch to 100% VisDrone now, the model will forget what a "normal" car loo
     SUPER_CONFIG_PATH: ./configs/r50_deformable_detr_motip_dancetrack.yaml
     
     # Load Stage 2 Result
-    DETR_PRETRAIN: "outputs/stage2_timestamp/checkpoint_best_idf1.pth"
+    DETR_PRETRAIN: "./pretrains/stage2_v2.pth"
     
     NUM_CLASSES: 2
     
