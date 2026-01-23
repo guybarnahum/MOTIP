@@ -14,6 +14,13 @@ We employ **Joint Training Strategy** designed to prevent catastrophic forgettin
 | **II** | **Refinement** | 15k BDD (Cars)<br>15k DanceTrack (People) | **10** | **~65.0 hrs** | ~$79.00 | Scale up volume (3x) to fix "Ghost Boxes" and stabilize tracking. |
 | **III** | **Aerial-Adaptation** | 15k VisDrone (Air)<br>5k DT/BDD (Replay) | **10** | **~45.0 hrs** | ~$55.00 | Adapt to aerial view while retaining ground object features. |
 
+### 🛡️ Dataset Integrity: Fixed Val/Test Splits
+To ensure valid comparisons between stages, we modified `builder.py` to enforce a **Manifest Lock**.
+
+* **The Mechanism:** The builder loads a `manifest.json` file defining specific video IDs for Validation and Test sets. These IDs are "locked" and excluded from the random selection pool before the training budget is filled.
+* **The Benefit:** Even when we triple the training data (Stage 1 $\to$ Stage 2) or change the random seed, **the Validation Set remains bit-exact identical**.
+* **Why it matters:** This prevents "Data Leakage" (training on validation data) and guarantees that any improvement in metrics (MOTA/IDF1) is due to model learning, not easier evaluation data.
+  
 ---
 
 ## 🛠️ Prerequisites
