@@ -84,14 +84,18 @@ class MetricAccumulator:
         precision = self.stats['TP'] / denom_prec
         recall = self.stats['TP'] / gt
         
+        # DetA (Detection Accuracy / Jaccard Index)
+        # TP / (TP + FP + FN)
+        denom_deta = max(1, self.stats['TP'] + self.stats['FP'] + self.stats['FN'])
+        deta = self.stats['TP'] / denom_deta
+
         # --- IDF1 Computation (On-the-fly Bipartite Matching) ---
         # 1. Build Cost Matrix from self.matches
         gt_ids = list(self.gt_id_frames.keys())
         pred_ids = list(self.pred_id_frames.keys())
         
-        if not gt_ids or not pred_ids:
-            idf1 = 0.0
-        else:
+        idf1 = 0.0
+        if gt_ids and pred_ids:
             # Map string IDs to integers 0..N
             gt_map = {g: i for i, g in enumerate(gt_ids)}
             pred_map = {p: i for i, p in enumerate(pred_ids)}
@@ -122,9 +126,15 @@ class MetricAccumulator:
             denom = total_gt_frames + total_pred_frames
             idf1 = (2 * idtp) / denom if denom > 0 else 0.0
 
+        # Estimated HOTA (Simplified Proxy)
+        # HOTA ~ Sqrt(DetA * AssA). We use IDF1 as a proxy for AssA in this single-threshold viz.
+        hota_est = np.sqrt(deta * idf1)
+
         return {
             'MOTA': mota * 100,
             'IDF1': idf1 * 100,
+            'DetA': deta * 100,
+            'HOTA_Est': hota_est * 100,
             'DetPr': precision * 100,
             'DetRe': recall * 100,
             'IDSW': self.stats['IDSW'],
@@ -437,7 +447,7 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args, metric
             cv2.putText(frame, text, (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
         # Legend (Expanded for Running Stats)
-        cv2.rectangle(frame, (5, 5), (300, 210), (0,0,0), -1)
+        cv2.rectangle(frame, (5, 5), (320, 235), (0,0,0), -1) # Expanded box size
         cv2.putText(frame, "Green: Stable Match", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
         cv2.putText(frame, "Orange: ID SWITCH", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
         cv2.putText(frame, "Red Box: False Pos", (10, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
@@ -447,7 +457,8 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args, metric
         cv2.putText(frame, f"Thresh: {args.score_thresh}", (10, 125), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         cv2.putText(frame, f"Run MOTA: {current_stats['MOTA']:.1f}%", (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
         cv2.putText(frame, f"Run IDF1: {current_stats['IDF1']:.1f}%", (10, 175), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
-        cv2.putText(frame, f"Run Prec: {current_stats['DetPr']:.1f}%", (10, 200), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
+        cv2.putText(frame, f"Run DetA: {current_stats['DetA']:.1f}%", (10, 200), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
+        cv2.putText(frame, f"~HOTA: {current_stats['HOTA_Est']:.1f}%  IDSW: {current_stats['IDSW']}", (10, 225), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
 
         out.write(frame)
         frame_idx += 1
@@ -622,14 +633,14 @@ if __name__ == "__main__":
             print("\n" + "="*40)
             print(f"📊 FINAL STATS (Threshold: {args.score_thresh})")
             print("="*40)
-            print(f" MOTA  : {final_stats['MOTA']:.2f} %")
-            print(f" IDF1  : {final_stats['IDF1']:.2f} %") # Added IDF1
-            print(f" DetPr : {final_stats['DetPr']:.2f} %")
-            print(f" DetRe : {final_stats['DetRe']:.2f} %")
-            print(f" TP    : {final_stats['TP']}")
-            print(f" FP    : {final_stats['FP']}")
-            print(f" FN    : {final_stats['FN']}")
-            print(f" IDSW  : {final_stats['IDSW']}")
+            print(f" MOTA    : {final_stats['MOTA']:.2f} %")
+            print(f" IDF1    : {final_stats['IDF1']:.2f} %")
+            print(f" DetA    : {final_stats['DetA']:.2f} %")
+            print(f" ~HOTA   : {final_stats['HOTA_Est']:.2f} %")
+            print(f" DetPr   : {final_stats['DetPr']:.2f} %")
+            print(f" DetRe   : {final_stats['DetRe']:.2f} %")
+            print(f" IDSW    : {final_stats['IDSW']}")
+            print(f" GT/TP/FP: {final_stats['GT']} / {final_stats['TP']} / {final_stats['FP']}")
             print("="*40)
             
             # NEW: Plot Histogram
