@@ -358,6 +358,9 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args, metric
         fps_scores = []
         match_pairs = [] # Store pairs for IDF1
         
+        # FIX: Capture Switch State for Drawing
+        switched_gids = set()
+
         for r, c in zip(row_ind, col_ind):
             if iou_matrix[r, c] >= 0.5:
                 matches.append((r, c))
@@ -376,6 +379,7 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args, metric
                 
                 if previous_pid is not None and previous_pid != pid:
                     frame_idsw += 1
+                    switched_gids.add(gid) # <--- CAPTURE SWITCH FOR DRAWING
                 
                 gt_id_to_pred_id[gid] = pid
 
@@ -434,11 +438,10 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args, metric
             gid = gt_ids_frame[c]
             x1, y1, x2, y2 = map(int, pbox)
             
-            # Re-check switch logic for drawing color (Redundant but keeps drawing code isolated)
-            previous_pid = gt_id_to_pred_id.get(gid)
-            if previous_pid is not None and previous_pid != pid: 
+            # Check switch logic using the CAPTURED state
+            if gid in switched_gids:
                 color = (0, 165, 255) # Orange
-                text = f"SWITCH! {previous_pid}->{pid}"
+                text = f"SWITCH! ->{pid}"
             else:
                 color = (0, 255, 0)
                 text = f"P:{pid} G:{gid}"
