@@ -258,6 +258,8 @@ def convert_to_h264_quiet(input_path, output_path):
         ]
         subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         tqdm.write(f"✅ H.264: {os.path.basename(output_path)}")
+    except FileNotFoundError:
+        tqdm.write("⚠️  Warning: ffmpeg not found. Skipping H.264 conversion.")
     except subprocess.CalledProcessError:
         tqdm.write(f"❌ Error converting {os.path.basename(input_path)}")
 
@@ -358,9 +360,9 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args, metric
         fps_scores = []
         match_pairs = [] # Store pairs for IDF1
         
-        # FIX: Capture Switch State for Drawing
+        # FIX 1: Capture switch state before updating `gt_id_to_pred_id`
         switched_gids = set()
-
+        
         for r, c in zip(row_ind, col_ind):
             if iou_matrix[r, c] >= 0.5:
                 matches.append((r, c))
@@ -379,7 +381,7 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args, metric
                 
                 if previous_pid is not None and previous_pid != pid:
                     frame_idsw += 1
-                    switched_gids.add(gid) # <--- CAPTURE SWITCH FOR DRAWING
+                    switched_gids.add(gid) # <--- CAPTURE SWITCH EVENT
                 
                 gt_id_to_pred_id[gid] = pid
 
@@ -438,10 +440,10 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args, metric
             gid = gt_ids_frame[c]
             x1, y1, x2, y2 = map(int, pbox)
             
-            # Check switch logic using the CAPTURED state
-            if gid in switched_gids:
+            # FIX 1: Check switch logic using the captured `switched_gids` set
+            if gid in switched_gids: 
                 color = (0, 165, 255) # Orange
-                text = f"SWITCH! ->{pid}"
+                text = f"SWITCH! {previous_pid}->{pid}" if 'previous_pid' in locals() else f"SWITCH! ->{pid}"
             else:
                 color = (0, 255, 0)
                 text = f"P:{pid} G:{gid}"
