@@ -160,7 +160,7 @@ def plot_dashboard(log_path):
 
     # Plot 6: Notes
     axs[1, 2].axis('off')
-    axs[1, 2].text(0.1, 0.5, "DIAGNOSTIC NOTES:\n\n1. If DetPr stays < 30%, \n   you have 'Ghost Boxes'.\n\n2. If AssA is climbing,\n   Tracking is working.\n\n3. If MOTA is Negative,\n   DetPr is the cause.", fontsize=11)
+    axs[1, 2].text(0.1, 0.5, "DIAGNOSTIC NOTES:\n\n1. If DetPr stays < 30%, you have 'Ghost Boxes'.\n\n2. If AssA is climbing, Tracking is working.\n\n3. If MOTA is Negative, DetPr is the cause.", fontsize=11)
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     
