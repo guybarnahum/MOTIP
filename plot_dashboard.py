@@ -9,7 +9,7 @@ def parse_log(log_path):
         'loss': [], 'detr_loss': [], 'id_loss': [],
         'class_error': [], 'grad_norm': [],
         'HOTA': [], 'MOTA': [], 'IDF1': [],
-        'DetPr': [], 'DetRe': [], 'AssA': [], 'DetA': [] # NEW Metrics
+        'DetPr': [], 'DetRe': [], 'AssA': [], 'DetA': [] 
     }
     
     # 1. Added [\-\d\.]+ to capture negative signs (e.g., -0.0000)
@@ -64,17 +64,6 @@ def parse_log(log_path):
             epoch = int(match.group(1))
             eval_map[epoch] = {
                 'HOTA': float(match.group(2)),
-                'MOTA': float(match.group(3)),
-                'IDF1': float(match.group(4)),
-                'DetA': float(match.group(3)), # Assuming capture group order above
-                'AssA': float(match.group(4)),
-                'DetPr': float(match.group(5)),
-                'DetRe': float(match.group(6)),
-            }
-            # Re-map correctly based on regex groups:
-            # Group 2: HOTA, 3: DetA, 4: AssA, 5: DetPr, 6: DetRe, 7: MOTA, 8: IDF1
-            eval_map[epoch] = {
-                'HOTA': float(match.group(2)),
                 'DetA': float(match.group(3)),
                 'AssA': float(match.group(4)),
                 'DetPr': float(match.group(5)),
@@ -117,37 +106,41 @@ def plot_dashboard(log_path):
     axs[0, 0].legend()
     axs[0, 0].grid(True, alpha=0.3)
 
-    # Plot 2: HOTA / MOTA (The Headlines)
+    # Plot 2: HOTA / MOTA (Fixed Legend)
     valid_idxs = [i for i, x in enumerate(data['HOTA']) if x is not None]
     if valid_idxs:
         valid_epochs = [epochs[i] for i in valid_idxs]
+        # Primary Axis (HOTA/IDF1)
         axs[0, 1].plot(valid_epochs, [data['HOTA'][i] for i in valid_idxs], 'b-s', linewidth=2, label='HOTA')
         axs[0, 1].plot(valid_epochs, [data['IDF1'][i] for i in valid_idxs], 'm:', label='IDF1')
         
-        # Plot MOTA on a secondary axis because it is negative
+        # Secondary Axis (MOTA)
         ax2 = axs[0, 1].twinx()
         ax2.plot(valid_epochs, [data['MOTA'][i] for i in valid_idxs], 'g--', label='MOTA')
         ax2.set_ylabel('MOTA (Green)')
-        ax2.set_ylim(-80, 20) # Force view of negative values
+        ax2.set_ylim(-80, 20) 
+        
+        # FIX: Combine legends from both axes
+        lines_1, labels_1 = axs[0, 1].get_legend_handles_labels()
+        lines_2, labels_2 = ax2.get_legend_handles_labels()
+        axs[0, 1].legend(lines_1 + lines_2, labels_1 + labels_2, loc='upper left')
         
     axs[0, 1].set_title('Overall Performance (HOTA & MOTA)')
     axs[0, 1].set_xlabel('Epoch')
     axs[0, 1].set_ylabel('Score (%)')
-    axs[0, 1].legend(loc='upper left')
     axs[0, 1].grid(True, alpha=0.3)
 
-    # Plot 3: The Ghost Monitor (Precision vs Recall) - NEW
+    # Plot 3: The Ghost Monitor
     if valid_idxs:
         axs[0, 2].plot(valid_epochs, [data['DetPr'][i] for i in valid_idxs], 'r-o', linewidth=2, label='Precision (DetPr)')
         axs[0, 2].plot(valid_epochs, [data['DetRe'][i] for i in valid_idxs], 'b--', label='Recall (DetRe)')
-    axs[0, 2].set_title('👻 Ghost Monitor (Prec vs Recall)')
+    axs[0, 2].set_title('Ghost Monitor (Prec vs Recall)')
     axs[0, 2].set_xlabel('Epoch')
     axs[0, 2].legend()
     axs[0, 2].grid(True, alpha=0.3)
-    # Highlight the "Ghost Zone"
     axs[0, 2].axhspan(0, 30, color='red', alpha=0.1, label='Ghost Zone')
 
-    # Plot 4: Stability (Gradient Norm)
+    # Plot 4: Stability
     valid_grads = [(e, g) for e, g in zip(epochs, data['grad_norm']) if g is not None]
     if valid_grads:
         axs[1, 0].plot(*zip(*valid_grads), 'k-x', linewidth=1, label='Grad Norm')
@@ -157,7 +150,7 @@ def plot_dashboard(log_path):
     else:
         axs[1, 0].text(0.5, 0.5, 'Gradients were Inf/NaN', ha='center', transform=axs[1, 0].transAxes)
 
-    # Plot 5: Brain vs Eyes (AssA vs DetA) - NEW
+    # Plot 5: Brain vs Eyes
     if valid_idxs:
         axs[1, 1].plot(valid_epochs, [data['AssA'][i] for i in valid_idxs], 'purple', linewidth=2, label='Association (Tracking)')
         axs[1, 1].plot(valid_epochs, [data['DetA'][i] for i in valid_idxs], 'orange', label='Detection (Finding)')
@@ -165,7 +158,7 @@ def plot_dashboard(log_path):
     axs[1, 1].legend()
     axs[1, 1].grid(True, alpha=0.3)
 
-    # Plot 6: Notes Area
+    # Plot 6: Notes
     axs[1, 2].axis('off')
     axs[1, 2].text(0.1, 0.5, "DIAGNOSTIC NOTES:\n\n1. If DetPr stays < 30%, \n   you have 'Ghost Boxes'.\n\n2. If AssA is climbing,\n   Tracking is working.\n\n3. If MOTA is Negative,\n   DetPr is the cause.", fontsize=11)
 
