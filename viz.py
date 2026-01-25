@@ -166,11 +166,28 @@ def load_mot_gt(gt_path):
     with open(gt_path, 'r') as f:
         for line in f:
             parts = line.strip().split(',')
+            # MOT Format: frame, id, left, top, width, height, conf, class, visibility
             frame = int(parts[0])
             obj_id = int(parts[1])
-            # GT is xywh (TopLeft)
             x, y, w, h = map(float, parts[2:6])
-            # Convert to xyxy (Corner)
+            
+            # --- FILTERING LOGIC ---
+            # Check if class/conf exists (standard MOT format has 9+ columns)
+            if len(parts) >= 8:
+                conf = float(parts[6])
+                cls = int(float(parts[7])) # Sometimes parsed as float
+                
+                # Filter 1: Ignore 'conf=0' (Standard 'Don't Care' flag in MOT)
+                if conf == 0:
+                    continue
+                
+                # Filter 2: Select only specific classes (Adjust based on your dataset!)
+                # BDD/DanceTrack usually use 1 for the main class (Car/Pedestrian)
+                # If you are tracking Cars, ensure you aren't loading Pedestrians(1) or Trucks(3)
+                # valid_classes = [1] # Uncomment this if you know your class ID
+                # if cls not in valid_classes:
+                #    continue
+
             x1, y1, x2, y2 = x, y, x + w, y + h
             
             if frame not in gt_dict:
