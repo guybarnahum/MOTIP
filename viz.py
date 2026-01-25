@@ -38,13 +38,31 @@ class MetricAccumulator:
         self.tp_scores = []
         self.fp_scores = []
         
-    def update(self, tp_count, fp_count, fn_count, idsw_count, gt_count):
+        # For IDF1 (Global ID Mapping)
+        # matches[gt_id][pred_id] = count of frames they matched
+        self.matches = defaultdict(lambda: defaultdict(int))
+        self.gt_id_frames = defaultdict(int)   # Total frames each GT_ID exists
+        self.pred_id_frames = defaultdict(int) # Total frames each Pred_ID exists
+        
+    def update(self, tp_count, fp_count, fn_count, idsw_count, gt_count, match_pairs, unmapped_gt_ids, unmapped_pred_ids):
         self.stats['TP'] += tp_count
         self.stats['FP'] += fp_count
         self.stats['FN'] += fn_count
         self.stats['IDSW'] += idsw_count
         self.stats['GT'] += gt_count
         
+        # Update IDF1 tracking
+        for gid, pid in match_pairs:
+            self.matches[gid][pid] += 1
+            self.gt_id_frames[gid] += 1
+            self.pred_id_frames[pid] += 1
+            
+        for gid in unmapped_gt_ids:
+            self.gt_id_frames[gid] += 1
+            
+        for pid in unmapped_pred_ids:
+            self.pred_id_frames[pid] += 1
+
     def add_confidences(self, tps_scores, fps_scores):
         self.tp_scores.extend(tps_scores)
         self.fp_scores.extend(fps_scores)
@@ -56,8 +74,40 @@ class MetricAccumulator:
         precision = self.stats['TP'] / max(1, self.stats['TP'] + self.stats['FP'])
         recall = self.stats['TP'] / gt
         
+        # --- IDF1 Computation (On-the-fly Bipartite Matching) ---
+        # 1. Build Cost Matrix from self.matches
+        gt_ids = list(self.gt_id_frames.keys())
+        pred_ids = list(self.pred_id_frames.keys())
+        
+        if not gt_ids or not pred_ids:
+            idf1 = 0.0
+        else:
+            # Matrix size [num_gt, num_pred] filled with negative match counts (for minimization)
+            cost_matrix = np.zeros((len(gt_ids), len(pred_ids)))
+            for i, gid in enumerate(gt_ids):
+                for j, pid in enumerate(pred_ids):
+                    # Negative because linear_sum_assignment finds min cost
+                    cost_matrix[i, j] = -self.matches[gid][pid]
+            
+            # Solve assignment
+            row_ind, col_ind = linear_sum_assignment(cost_matrix)
+            
+            # Sum up IDTP (Identity True Positives)
+            idtp = 0
+            for r, c in zip(row_ind, col_ind):
+                # Flip back sign
+                idtp += (-cost_matrix[r, c])
+                
+            # IDF1 Formula: 2 * IDTP / (Sum(GT_Frames) + Sum(Pred_Frames))
+            total_gt_frames = sum(self.gt_id_frames.values())
+            total_pred_frames = sum(self.pred_id_frames.values())
+            
+            denom = total_gt_frames + total_pred_frames
+            idf1 = (2 * idtp) / denom if denom > 0 else 0.0
+
         return {
             'MOTA': mota * 100,
+            'IDF1': idf1 * 100,
             'DetPr': precision * 100,
             'DetRe': recall * 100,
             'IDSW': self.stats['IDSW'],
@@ -159,7 +209,7 @@ def convert_to_h264_quiet(input_path, output_path):
             'ffmpeg', '-y', '-i', input_path,
             '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
             '-pix_fmt', 'yuv420p',
-            '-loglevel', 'error', # Suppress ffmpeg output
+            '-loglevel', 'error',
             output_path
         ]
         subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -206,6 +256,9 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args, metric
     gt_id_to_pred_id = {} 
     frame_idx = 1 
     
+    # NEW: Sequence Accumulator for Running Stats (Visual Only)
+    seq_stats = MetricAccumulator()
+
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret: break
@@ -258,6 +311,7 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args, metric
         frame_idsw = 0
         tps_scores = []
         fps_scores = []
+        match_pairs = [] # Store pairs for IDF1
         
         for r, c in zip(row_ind, col_ind):
             if iou_matrix[r, c] >= 0.5:
@@ -265,13 +319,14 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args, metric
                 matched_gt_indices.add(c)
                 matched_pred_indices.add(r)
                 
-                # Metric: TP
+                # IDF1 Match pair
+                pid = pred_ids[r]
+                gid = gt_ids_frame[c]
+                match_pairs.append((gid, pid))
+
                 frame_tp += 1
                 tps_scores.append(pred_scores[r])
 
-                # Check ID Switch
-                pid = pred_ids[r]
-                gid = gt_ids_frame[c]
                 previous_pid = gt_id_to_pred_id.get(gid)
                 
                 if previous_pid is not None and previous_pid != pid:
@@ -289,9 +344,17 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args, metric
             if i not in matched_pred_indices:
                 fps_scores.append(score)
 
-        # Update metrics (New param passed to function)
-        metrics.update(frame_tp, frame_fp, frame_fn, frame_idsw, frame_gt)
+        # Identify Unmapped IDs for IDF1
+        unmapped_gts = [gt_ids_frame[i] for i in range(len(gt_ids_frame)) if i not in matched_gt_indices]
+        unmapped_preds = [pred_ids[i] for i in range(len(pred_ids)) if i not in matched_pred_indices]
+
+        # Update Metrics
+        metrics.update(frame_tp, frame_fp, frame_fn, frame_idsw, frame_gt, match_pairs, unmapped_gts, unmapped_preds)
         metrics.add_confidences(tps_scores, fps_scores)
+        
+        # Update Sequence Stats
+        seq_stats.update(frame_tp, frame_fp, frame_fn, frame_idsw, frame_gt, match_pairs, unmapped_gts, unmapped_preds)
+        current_stats = seq_stats.compute_metrics()
 
         # Write txt results
         for i, bbox in enumerate(raw_pred_boxes):
@@ -301,23 +364,19 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args, metric
             # Write line standard MOT: frame, id, bb_left, bb_top, bb_width, bb_height, conf, x, y, z
             res_f.write(f"{frame_idx},{pid},{l:.2f},{t:.2f},{w:.2f},{h:.2f},{score:.4f},-1,-1,-1\n")
 
-        # --- DRAWING (Original Logic Preserved) ---
-        # Misses (Blue)
+        # --- DRAWING ---
         for i, gbox in enumerate(gt_boxes):
             if i not in matched_gt_indices:
                 x1, y1, x2, y2 = map(int, gbox)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
-                cv2.putText(frame, f"MISS G:{gt_ids_frame[i]}", (x1, y1-5), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+                cv2.putText(frame, f"MISS G:{gt_ids_frame[i]}", (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
 
         # False Positives (Red)
         for i, pbox in enumerate(pred_boxes):
             if i not in matched_pred_indices:
                 x1, y1, x2, y2 = map(int, pbox)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
-                # Show score to help debug ghosts
-                cv2.putText(frame, f"FP {pred_scores[i]:.2f}", (x1, y1-5), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                cv2.putText(frame, f"FP {pred_scores[i]:.2f}", (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
 
         # Matches (Green/Orange)
         for r, c in matches:
@@ -328,8 +387,8 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args, metric
             
             # Re-check switch logic for drawing color (Redundant but keeps drawing code isolated)
             previous_pid = gt_id_to_pred_id.get(gid)
-            if previous_pid is not None and previous_pid != pid: # Switch detected in previous loop, but we need color here
-                color = (0, 165, 255) # Orange
+            if previous_pid is not None and previous_pid != pid: 
+                color = (0, 165, 255)
                 text = f"SWITCH! {previous_pid}->{pid}"
             else:
                 color = (0, 255, 0)
@@ -338,13 +397,18 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args, metric
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
             cv2.putText(frame, text, (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
-        # Legend
-        cv2.rectangle(frame, (5, 5), (250, 130), (0,0,0), -1)
+        # Expanded Legend
+        cv2.rectangle(frame, (5, 5), (300, 210), (0,0,0), -1) # Taller box
         cv2.putText(frame, "Green: Stable Match", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
         cv2.putText(frame, "Orange: ID SWITCH", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
         cv2.putText(frame, "Red Box: False Pos", (10, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
         cv2.putText(frame, "Blue: Missed GT", (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
-        cv2.putText(frame, f"Score Thresh: {args.score_thresh}", (10, 125), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
+        # Real-time Metrics
+        cv2.putText(frame, f"Thresh: {args.score_thresh}", (10, 125), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        cv2.putText(frame, f"Run MOTA: {current_stats['MOTA']:.1f}%", (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
+        cv2.putText(frame, f"Run IDF1: {current_stats['IDF1']:.1f}%", (10, 175), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
+        cv2.putText(frame, f"Run Prec: {current_stats['DetPr']:.1f}%", (10, 200), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
 
         out.write(frame)
         frame_idx += 1
@@ -410,23 +474,13 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='./configs/pretrain_r50_deformable_detr_bdd_mini.yaml')
-    # Checkpoint optional in argparse, manually checked later
     parser.add_argument('--checkpoint', type=str, default=None)
-    
-    # Input Modes
-    parser.add_argument('--dataset_root', type=str, default='./datasets/DanceTrack/val',
-                        help="Path to a folder containing multiple sequences")
-    parser.add_argument('--input_video', type=str, default=None,
-                        help="Path to a SINGLE specific sequence directory (overrides dataset_root)")
-    
     parser.add_argument('--output_dir', type=str, default='./outputs/stage1_id_viz')
+    parser.add_argument('--dataset_root', type=str, default='./datasets/DanceTrack/val',help="Path to a folder containing multiple sequences")
+    parser.add_argument('--input_video', type=str, default=None, help="Path to a SINGLE specific sequence directory (overrides dataset_root)")
     parser.add_argument('--score_thresh', type=float, default=0.4)
-    parser.add_argument('--html_template', type=str, default='viz_viewer.html', 
-                       help="Path to the HTML viewer template file")
-    
-    # New Flag
-    parser.add_argument('--html_only', action='store_true', 
-                       help="Skip video generation and only regenerate the HTML viewer")
+    parser.add_argument('--html_template', type=str, default='viz_viewer.html', help="Path to the HTML viewer template file")
+    parser.add_argument('--html_only', action='store_true', help="Skip video generation and only regenerate the HTML viewer")
     
     args = parser.parse_args()
 
@@ -449,7 +503,6 @@ if __name__ == "__main__":
 
     try:
         os.makedirs(args.output_dir, exist_ok=True)
-        # NEW: Accumulator
         metrics = MetricAccumulator()
         generated_videos = []
 
@@ -514,12 +567,13 @@ if __name__ == "__main__":
             else:
                 print("⚠️ No videos generated. Check dataset path.")
             
-            # NEW: Compute and Print Final Stats
+            # Compute and Print Final Stats
             final_stats = metrics.compute_metrics()
             print("\n" + "="*40)
             print(f"📊 FINAL STATS (Threshold: {args.score_thresh})")
             print("="*40)
             print(f" MOTA  : {final_stats['MOTA']:.2f} %")
+            print(f" IDF1  : {final_stats['IDF1']:.2f} %") # Added IDF1
             print(f" DetPr : {final_stats['DetPr']:.2f} %")
             print(f" DetRe : {final_stats['DetRe']:.2f} %")
             print(f" TP    : {final_stats['TP']}")
@@ -544,6 +598,5 @@ if __name__ == "__main__":
         
     except Exception as e:
         print(f"\n❌ ERROR: {e}")
-        # Optional: Print traceback to debug
         import traceback; traceback.print_exc()
         sys.exit(1)
