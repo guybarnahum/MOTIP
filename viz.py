@@ -9,8 +9,10 @@ import glob
 import json
 import shutil
 import subprocess
+import matplotlib.pyplot as plt
 from scipy.optimize import linear_sum_assignment
 from tqdm import tqdm
+from collections import defaultdict
 
 # Import your existing modules
 from utils_inference import recover_embeddings
@@ -23,6 +25,68 @@ try:
 except ImportError:
     print("⚠️ Warning: models/longterm_memory.py not found. Viz will skip Re-ID.")
     LongTermMemory = None
+
+# -------------------------------------------------------------------------
+# NEW: Metric Accumulator (The Brain 🧠)
+# -------------------------------------------------------------------------
+class MetricAccumulator:
+    def __init__(self):
+        self.stats = {
+            'GT': 0, 'TP': 0, 'FP': 0, 'FN': 0, 'IDSW': 0
+        }
+        # For Histogram
+        self.tp_scores = []
+        self.fp_scores = []
+        
+    def update(self, tp_count, fp_count, fn_count, idsw_count, gt_count):
+        self.stats['TP'] += tp_count
+        self.stats['FP'] += fp_count
+        self.stats['FN'] += fn_count
+        self.stats['IDSW'] += idsw_count
+        self.stats['GT'] += gt_count
+        
+    def add_confidences(self, tps_scores, fps_scores):
+        self.tp_scores.extend(tps_scores)
+        self.fp_scores.extend(fps_scores)
+
+    def compute_metrics(self):
+        gt = max(1, self.stats['GT'])
+        # Simplified MOTA calculation
+        mota = 1.0 - (self.stats['FN'] + self.stats['FP'] + self.stats['IDSW']) / gt
+        precision = self.stats['TP'] / max(1, self.stats['TP'] + self.stats['FP'])
+        recall = self.stats['TP'] / gt
+        
+        return {
+            'MOTA': mota * 100,
+            'DetPr': precision * 100,
+            'DetRe': recall * 100,
+            'IDSW': self.stats['IDSW'],
+            'GT': self.stats['GT'],
+            'TP': self.stats['TP'],
+            'FP': self.stats['FP'],
+            'FN': self.stats['FN']
+        }
+
+    def plot_histogram(self, output_dir):
+        if not self.tp_scores and not self.fp_scores:
+            return
+            
+        plt.figure(figsize=(10, 6))
+        # Plot histogram of confidences
+        plt.hist([self.tp_scores, self.fp_scores], bins=20, range=(0, 1), 
+                 color=['green', 'red'], label=['True Positives', 'False Positives (Ghosts)'],
+                 stacked=True, alpha=0.7)
+        plt.axvline(x=0.5, color='blue', linestyle='--', label='Suggested Cutoff (0.5)')
+        plt.title('Confidence Distribution: Real Cars vs Ghosts')
+        plt.xlabel('Confidence Score')
+        plt.ylabel('Count')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        save_path = os.path.join(output_dir, 'confidence_hist.png')
+        plt.savefig(save_path)
+        plt.close()
+        print(f"📊 Histogram saved to: {save_path}")
 
 # -------------------------------------------------------------------------
 # Helper: Ground Truth Parsing
@@ -54,6 +118,8 @@ def convert_tlwh_to_xyxy(boxes):
     """
     Converts TopLeft-Size [x1, y1, w, h] to Corner-Corner [x1, y1, x2, y2]
     """
+    if len(boxes) == 0:
+        return np.empty((0, 4))
     x1 = boxes[:, 0]
     y1 = boxes[:, 1]
     w  = boxes[:, 2]
@@ -104,7 +170,7 @@ def convert_to_h264_quiet(input_path, output_path):
 # -------------------------------------------------------------------------
 # Main Processor
 # -------------------------------------------------------------------------
-def process_sequence(seq_path, gt_path, output_path, model, device, args):
+def process_sequence(seq_path, gt_path, output_path, model, device, args, metrics):
     cap = cv2.VideoCapture(os.path.join(seq_path, 'img1/%08d.jpg'))
     if not cap.isOpened(): return
 
@@ -124,6 +190,11 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args):
         memory = LongTermMemory(patience=900, gallery_size=5, similarity_thresh=0.85)
 
     gt_data = load_mot_gt(gt_path)
+    
+    # NEW: Setup Result Export (Standard MOT Format)
+    res_file = os.path.join(args.output_dir, 'results', f"{os.path.basename(seq_path.rstrip('/'))}.txt")
+    os.makedirs(os.path.dirname(res_file), exist_ok=True)
+    res_f = open(res_file, 'w')
     
     # Temp file for OpenCV writing
     temp_out = output_path.replace(".mp4", "_temp.mp4")
@@ -165,6 +236,9 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args):
 
         raw_pred_boxes = res['bbox'].cpu().numpy()
         pred_ids = res['id'].tolist()
+        # NEW: Handle scores for histogram
+        pred_scores = res.get('scores', torch.ones(len(pred_ids))).cpu().tolist()
+        
         pred_boxes = convert_tlwh_to_xyxy(raw_pred_boxes)
         
         current_gt = gt_data.get(frame_idx, [])
@@ -179,13 +253,55 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args):
         matched_pred_indices = set()
         matches = [] 
         
+        # NEW: Metric Tracking per frame
+        frame_tp = 0
+        frame_idsw = 0
+        tps_scores = []
+        fps_scores = []
+        
         for r, c in zip(row_ind, col_ind):
             if iou_matrix[r, c] >= 0.5:
                 matches.append((r, c))
                 matched_gt_indices.add(c)
                 matched_pred_indices.add(r)
+                
+                # Metric: TP
+                frame_tp += 1
+                tps_scores.append(pred_scores[r])
 
-        # Draw
+                # Check ID Switch
+                pid = pred_ids[r]
+                gid = gt_ids_frame[c]
+                previous_pid = gt_id_to_pred_id.get(gid)
+                
+                if previous_pid is not None and previous_pid != pid:
+                    frame_idsw += 1
+                
+                gt_id_to_pred_id[gid] = pid
+
+        # Metric: FP / FN / GT
+        frame_fp = len(pred_boxes) - len(matched_pred_indices)
+        frame_fn = len(gt_boxes) - len(matched_gt_indices)
+        frame_gt = len(gt_boxes)
+        
+        # Collect FP scores for histogram
+        for i, score in enumerate(pred_scores):
+            if i not in matched_pred_indices:
+                fps_scores.append(score)
+
+        # Update metrics (New param passed to function)
+        metrics.update(frame_tp, frame_fp, frame_fn, frame_idsw, frame_gt)
+        metrics.add_confidences(tps_scores, fps_scores)
+
+        # Write txt results
+        for i, bbox in enumerate(raw_pred_boxes):
+            l, t, w, h = bbox
+            score = pred_scores[i]
+            pid = pred_ids[i]
+            # Write line standard MOT: frame, id, bb_left, bb_top, bb_width, bb_height, conf, x, y, z
+            res_f.write(f"{frame_idx},{pid},{l:.2f},{t:.2f},{w:.2f},{h:.2f},{score:.4f},-1,-1,-1\n")
+
+        # --- DRAWING (Original Logic Preserved) ---
         # Misses (Blue)
         for i, gbox in enumerate(gt_boxes):
             if i not in matched_gt_indices:
@@ -199,7 +315,8 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args):
             if i not in matched_pred_indices:
                 x1, y1, x2, y2 = map(int, pbox)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
-                cv2.putText(frame, f"FP P:{pred_ids[i]}", (x1, y1-5), 
+                # Show score to help debug ghosts
+                cv2.putText(frame, f"FP {pred_scores[i]:.2f}", (x1, y1-5), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
 
         # Matches (Green/Orange)
@@ -209,16 +326,11 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args):
             gid = gt_ids_frame[c]
             x1, y1, x2, y2 = map(int, pbox)
             
+            # Re-check switch logic for drawing color (Redundant but keeps drawing code isolated)
             previous_pid = gt_id_to_pred_id.get(gid)
-            if previous_pid is None:
-                color = (0, 255, 0)
-                text = f"P:{pid} G:{gid}"
-                gt_id_to_pred_id[gid] = pid
-            elif previous_pid != pid:
+            if previous_pid is not None and previous_pid != pid: # Switch detected in previous loop, but we need color here
                 color = (0, 165, 255) # Orange
                 text = f"SWITCH! {previous_pid}->{pid}"
-                gt_id_to_pred_id[gid] = pid
-                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 4)
             else:
                 color = (0, 255, 0)
                 text = f"P:{pid} G:{gid}"
@@ -239,6 +351,7 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args):
 
     out.release()
     cap.release()
+    res_f.close()
     
     # H.264 Conversion (Safe)
     if os.path.exists(temp_out):
@@ -252,7 +365,7 @@ def copy_training_metrics(checkpoint_path, output_dir):
     Returns True if found and copied, False otherwise.
     """
     ckpt_dir = os.path.dirname(checkpoint_path)
-    potential_names = ['train.png', 'loss.png', 'metrics.png']
+    potential_names = ['train.png', 'loss.png', 'metrics.png', 'train_dashboard.png']
     
     found_path = None
     for name in potential_names:
@@ -336,6 +449,8 @@ if __name__ == "__main__":
 
     try:
         os.makedirs(args.output_dir, exist_ok=True)
+        # NEW: Accumulator
+        metrics = MetricAccumulator()
         generated_videos = []
 
         # --- HTML ONLY MODE ---
@@ -384,7 +499,8 @@ if __name__ == "__main__":
                 gt_path = os.path.join(seq, 'gt/gt.txt')
                 out_path = os.path.join(args.output_dir, f"{seq_name}_id_viz.mp4")
                 
-                process_sequence(seq, gt_path, out_path, model, device, args)
+                # Pass metrics accumulator to processor
+                process_sequence(seq, gt_path, out_path, model, device, args, metrics)
                 
                 if os.path.exists(out_path):
                     generated_videos.append(out_path)
@@ -397,6 +513,23 @@ if __name__ == "__main__":
                 generate_html_viewer(args.output_dir, generated_videos, args.html_template)
             else:
                 print("⚠️ No videos generated. Check dataset path.")
+            
+            # NEW: Compute and Print Final Stats
+            final_stats = metrics.compute_metrics()
+            print("\n" + "="*40)
+            print(f"📊 FINAL STATS (Threshold: {args.score_thresh})")
+            print("="*40)
+            print(f" MOTA  : {final_stats['MOTA']:.2f} %")
+            print(f" DetPr : {final_stats['DetPr']:.2f} %")
+            print(f" DetRe : {final_stats['DetRe']:.2f} %")
+            print(f" TP    : {final_stats['TP']}")
+            print(f" FP    : {final_stats['FP']}")
+            print(f" FN    : {final_stats['FN']}")
+            print(f" IDSW  : {final_stats['IDSW']}")
+            print("="*40)
+            
+            # NEW: Plot Histogram
+            metrics.plot_histogram(args.output_dir)
 
     except torch.cuda.OutOfMemoryError:
         print("\n" + "🟥"*32)
