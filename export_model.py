@@ -97,6 +97,7 @@ def export_deployment_model(args):
     deploy_payload = {
         'model_state_dict': model.state_dict(),
         'model_args': {
+            # --- DETR / Transformer Args ---
             'num_classes': cfg.get('NUM_CLASSES', 2),
             'hidden_dim': cfg.get('HIDDEN_DIM', 256),
             'nheads': cfg.get('NHEADS', 8),
@@ -112,6 +113,18 @@ def export_deployment_model(args):
             'num_queries': cfg.get('NUM_QUERIES', 300),
             'aux_loss': False,
             'with_box_refine': cfg.get('WITH_BOX_REFINE', True),
+            
+            # --- MOTIP Specific Args (CRITICAL FIX) ---
+            # These are required to match the checkpoint architecture exactly
+            'feature_dim': int(cfg.get('FEATURE_DIM', 256)),
+            'id_dim': int(cfg.get('ID_DIM', 128)),
+            'ffn_dim_ratio': int(cfg.get('FFN_DIM_RATIO', 4)),
+            'num_id_decoder_layers': int(cfg.get('NUM_ID_DECODER_LAYERS', 6)),
+            'head_dim': int(cfg.get('HEAD_DIM', 256)),
+            'num_id_vocabulary': int(cfg.get('NUM_ID_VOCABULARY', 1000)),
+            'rel_pe_length': int(cfg.get('REL_PE_LENGTH', 50)),
+            'use_aux_loss': cfg.get('USE_AUX_LOSS', True),
+            'use_shared_aux_head': cfg.get('USE_SHARED_AUX_HEAD', True),
         }
     }
 
