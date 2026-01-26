@@ -7,15 +7,11 @@ import yaml
 import time
 import torch.nn.functional as F
 import warnings
-import types
 
 # Custom Modules
 from utils_inference import convert_to_h264
 from utils_display import Annotator
 from models.motip import build as build_model
-# NEW: Import specific classes for manual build (Deployment mode)
-from models.motip import MOTIP
-from models.backbone import build_backbone
 from models.runtime_tracker import RuntimeTracker
 from models.longterm_memory import LongTermMemory
 
@@ -41,7 +37,6 @@ def get_args():
     # Memory Settings
     parser.add_argument('--miss_tolerance', type=int, default=30, help="Short term tracker memory")
     parser.add_argument('--longterm_patience', type=int, default=9000, help="Long term gallery memory")
-    # NEW: Flag to disable memory
     parser.add_argument('--no_memory', action='store_true', help="Disable LongTerm Memory ReID")
     
     return parser.parse_args()
@@ -77,30 +72,39 @@ def main():
         model_args = ckpt['model_args']
         state_dict = ckpt['model_state_dict']
         
-        # 1. Rebuild Backbone
-        backbone = build_backbone(model_args)
+        # reconstruct a 'dummy' cfg object that build_model expects
+        # We assume standard defaults for things we didn't export (like backbone name)
+        deploy_cfg = {
+            'NUM_CLASSES': model_args.get('num_classes', 2),
+            'HIDDEN_DIM': model_args.get('hidden_dim', 256),
+            'NHEADS': model_args.get('nheads', 8),
+            'ENC_LAYERS': model_args.get('num_encoder_layers', 6),
+            'DEC_LAYERS': model_args.get('num_decoder_layers', 6),
+            'DIM_FEEDFORWARD': model_args.get('dim_feedforward', 1024),
+            'DROPOUT': 0.0,
+            'NUM_QUERIES': model_args.get('num_queries', 300),
+            'AUX_LOSS': False,
+            'WITH_BOX_REFINE': model_args.get('with_box_refine', True),
+            'TWO_STAGE': model_args.get('two_stage', False),
+            'DEVICE': args.device,
+            # DEFAULTS (Since we didn't export these, we assume standard MOTIP/ResNet50)
+            'BACKBONE': 'resnet50', 
+            'MASKS': False,
+            'DILATION': False,
+            'POSITION_EMBEDDING': 'sine',
+            'CLIP_MAX_NORM': 0.1,
+            'ACTIVATION': model_args.get('activation', 'relu'),
+            'NUM_FEATURE_LEVELS': model_args.get('num_feature_levels', 4),
+            'DEC_N_POINTS': model_args.get('dec_n_points', 4),
+            'ENC_N_POINTS': model_args.get('enc_n_points', 4)
+        }
         
-        # 2. Rebuild MOTIP
-        model = MOTIP(
-            backbone,
-            num_classes=model_args['num_classes'],
-            num_queries=model_args.get('num_queries', 300),
-            aux_loss=False,
-            with_box_refine=model_args.get('with_box_refine', True),
-            two_stage=model_args.get('two_stage', False),
-            hidden_dim=model_args.get('hidden_dim', 256),
-            nheads=model_args.get('nheads', 8),
-            num_encoder_layers=model_args.get('num_encoder_layers', 6),
-            num_decoder_layers=model_args.get('num_decoder_layers', 6),
-            dim_feedforward=model_args.get('dim_feedforward', 1024),
-            dropout=0.0, # Force inference safety
-            activation=model_args.get('activation', 'relu'),
-            num_feature_levels=model_args.get('num_feature_levels', 4),
-            dec_n_points=model_args.get('dec_n_points', 4),
-            enc_n_points=model_args.get('enc_n_points', 4)
-        )
+        # Use the existing factory function (Safe!)
+        model = build_model(deploy_cfg)
+        model = model[0] if isinstance(model, tuple) else model
         
-        model.load_state_dict(state_dict)
+        # Load state dict
+        model.load_state_dict(state_dict, strict=False)
         print("✅ Model built successfully from embedded args.")
 
     else:
@@ -148,7 +152,6 @@ def main():
     model.eval()
     
     # 3. Setup Modules
-    # NEW: Condition to disable memory
     if args.no_memory:
         memory = None
         print("🧠 LongTerm Memory: DISABLED")
@@ -238,7 +241,6 @@ def main():
 
             # --- C. MEMORY UPDATE ---
             final_ids = []
-            # NEW: Check if memory exists before updating
             if memory is not None and active_embeds is not None and len(valid_ids) > 0:
                 id_map = memory.update(frame_idx, valid_ids, active_embeds)
                 final_ids = [id_map.get(vid, vid) for vid in valid_ids]
@@ -258,7 +260,6 @@ def main():
             # Count how many objects have a different final_id than their tracker id
             current_overrides_count = sum(1 for o, f in zip(valid_ids, final_ids) if o != f)
             
-            # NEW: Handle dashboard if memory is disabled
             if memory is not None:
                 mem_stats = {
                     "gallery_size": len(memory.storage),
