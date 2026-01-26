@@ -83,9 +83,11 @@ def main():
             'DIM_FEEDFORWARD': model_args.get('dim_feedforward', 1024),
             'DROPOUT': 0.0,
             
-            # --- FIX: Map the key exactly as expected by __init__.py ---
+            # --- FIX: Map keys exactly as expected by __init__.py ---
             'NUM_QUERIES': model_args.get('num_queries', 300),
             'DETR_NUM_QUERIES': model_args.get('num_queries', 300), 
+            'NUM_FEATURE_LEVELS': model_args.get('num_feature_levels', 4),
+            'DETR_NUM_FEATURE_LEVELS': model_args.get('num_feature_levels', 4), # <--- ADDED THIS
             # -----------------------------------------------------------
             
             'AUX_LOSS': False,
@@ -99,7 +101,6 @@ def main():
             'DILATION': False,
             'POSITION_EMBEDDING': 'sine',
             'ACTIVATION': model_args.get('activation', 'relu'),
-            'NUM_FEATURE_LEVELS': model_args.get('num_feature_levels', 4),
             'DEC_N_POINTS': model_args.get('dec_n_points', 4),
             'ENC_N_POINTS': model_args.get('enc_n_points', 4),
             
