@@ -11,8 +11,11 @@ import types
 
 # Custom Modules
 from utils_inference import convert_to_h264
-from utils_display import Annotator  # <--- NEW: Import Annotator
+from utils_display import Annotator
 from models.motip import build as build_model
+# NEW: Import specific classes for manual build (Deployment mode)
+from models.motip import MOTIP
+from models.backbone import build_backbone
 from models.runtime_tracker import RuntimeTracker
 from models.longterm_memory import LongTermMemory
 
@@ -22,16 +25,16 @@ sys.path.append(os.getcwd())
 def get_args():
     parser = argparse.ArgumentParser("MOTIP + Memory")
     
-    # Standard MOTIP Arguments
-    parser.add_argument('--config_path', type=str, default='./configs/r50_motip_bdd100k.yaml')
-    parser.add_argument('--checkpoint', type=str, default='./pretrains/motip_bdd100k.pth')
+    # Config is now OPTIONAL (default None)
+    parser.add_argument('--config_path', type=str, default=None, help="Required only for Dev models")
+    parser.add_argument('--checkpoint', type=str, required=True, help="Path to .pth model (Deploy or Dev)")
     parser.add_argument('--video_path', type=str, required=True)
     parser.add_argument('--output_path', type=str, default="output_final.mp4")
     parser.add_argument('--device', type=str, default="cuda")
     parser.add_argument('--fp16', action='store_true')
     parser.add_argument('--score_thresh', type=float, default=0.5)
     
-    # RESTORED: Frame Range Arguments
+    # Frame Range Arguments
     parser.add_argument('--start_frame', type=int, default=0, help="Frame to start processing")
     parser.add_argument('--end_frame', type=int, default=None, help="Frame to stop processing")
     
@@ -55,36 +58,105 @@ def main():
         gpu_name = "CPU"
         print("⚠️  Running on CPU (Slow!)")
 
-    # 2. Setup Model
-    with open(args.config_path, 'r') as f:
-        cfg = yaml.safe_load(f)
-
-    # Check for inheritance and merge
-    if "SUPER_CONFIG_PATH" in cfg:
-        print(f"🔗 Inheriting config from: {cfg['SUPER_CONFIG_PATH']}")
-        with open(cfg["SUPER_CONFIG_PATH"], 'r') as f_base:
-            base_cfg = yaml.safe_load(f_base)
-        
-        # Merge: Base config + Child config (Child overwrites Base)
-        # Note: This is a shallow merge. For deep merging, you might need a custom function,
-        # but for simple MOTIP configs, this update() is usually sufficient.
-        base_cfg.update(cfg) 
-        cfg = base_cfg
-
-    if 'DEVICE' not in cfg: cfg['DEVICE'] = args.device
-    
-    print("🏗️  Building model...")
-    model = build_model(cfg)
-    model = model[0] if isinstance(model, tuple) else model
-    model.to(device)
-    
+    # 2. LOAD CHECKPOINT FIRST (To determine mode)
     print(f"📥 Loading weights: {args.checkpoint}")
+    if not os.path.exists(args.checkpoint):
+        print(f"❌ Error: Checkpoint not found at {args.checkpoint}")
+        return
+        
     ckpt = torch.load(args.checkpoint, map_location='cpu')
-    model.load_state_dict(ckpt.get('model', ckpt), strict=False)
 
+    # --- HYBRID LOADING LOGIC ---
+    if 'model_args' in ckpt:
+        # ==========================================
+        # PATH A: DEPLOYMENT MODEL (Config-Free)
+        # ==========================================
+        print("🚀 Detected Deployment Model (Config-Free Inference)")
+        model_args = ckpt['model_args']
+        state_dict = ckpt['model_state_dict']
+        
+        # 1. Rebuild Backbone
+        # We wrap args in a simple namespace or dict wrapper if build_backbone expects one,
+        # but usually it takes direct args or a config dict. 
+        # Here we assume standard MOTIP build_backbone usage.
+        backbone = build_backbone(model_args)
+        
+        # 2. Rebuild MOTIP
+        model = MOTIP(
+            backbone,
+            num_classes=model_args['num_classes'],
+            num_queries=model_args.get('num_queries', 300),
+            aux_loss=False,
+            with_box_refine=model_args.get('with_box_refine', True),
+            two_stage=model_args.get('two_stage', False),
+            hidden_dim=model_args.get('hidden_dim', 256),
+            nheads=model_args.get('nheads', 8),
+            num_encoder_layers=model_args.get('num_encoder_layers', 6),
+            num_decoder_layers=model_args.get('num_decoder_layers', 6),
+            dim_feedforward=model_args.get('dim_feedforward', 1024),
+            dropout=0.0, # Force inference safety
+            activation=model_args.get('activation', 'relu'),
+            num_feature_levels=model_args.get('num_feature_levels', 4),
+            dec_n_points=model_args.get('dec_n_points', 4),
+            enc_n_points=model_args.get('enc_n_points', 4)
+        )
+        
+        model.load_state_dict(state_dict)
+        print("✅ Model built successfully from embedded args.")
+
+    else:
+        # ==========================================
+        # PATH B: DEVELOPMENT MODEL (Requires Yaml)
+        # ==========================================
+        print("🛠️  Detected Development Model (Requires Config)")
+        
+        if args.config_path is None:
+            # Fallback default if user forgot arg
+            print("⚠️  No config provided. Trying default './configs/r50_motip_bdd100k.yaml'")
+            args.config_path = './configs/r50_motip_bdd100k.yaml'
+            
+        if not os.path.exists(args.config_path):
+            print(f"❌ Error: Config not found at {args.config_path}")
+            return
+
+        with open(args.config_path, 'r') as f:
+            cfg = yaml.safe_load(f)
+
+        # Merge Parent Configs
+        if "SUPER_CONFIG_PATH" in cfg:
+            print(f"🔗 Inheriting config from: {cfg['SUPER_CONFIG_PATH']}")
+            # Resolve path relative to current config or root
+            super_path = cfg["SUPER_CONFIG_PATH"]
+            if not os.path.exists(super_path):
+                # Try relative to the config file directory
+                config_dir = os.path.dirname(args.config_path)
+                super_path = os.path.join(config_dir, cfg["SUPER_CONFIG_PATH"])
+            
+            if os.path.exists(super_path):
+                with open(super_path, 'r') as f_base:
+                    base_cfg = yaml.safe_load(f_base)
+                base_cfg.update(cfg) 
+                cfg = base_cfg
+            else:
+                 print(f"⚠️ Warning: Could not find super config {cfg['SUPER_CONFIG_PATH']}")
+
+        if 'DEVICE' not in cfg: cfg['DEVICE'] = args.device
+        
+        print("🏗️  Building model from YAML...")
+        model = build_model(cfg)
+        model = model[0] if isinstance(model, tuple) else model
+        
+        # Load weights
+        model.load_state_dict(ckpt.get('model', ckpt), strict=False)
+
+    # --- END HYBRID LOGIC ---
+
+    model.to(device)
+    model.eval()
+    
     # 3. Setup Modules
     memory = LongTermMemory(patience=args.longterm_patience)
-    annotator = Annotator()  # <--- NEW: Initialize Annotator
+    annotator = Annotator()
     
     # 4. Video IO Setup
     cap = cv2.VideoCapture(args.video_path)
@@ -96,7 +168,7 @@ def main():
     fps = cap.get(cv2.CAP_PROP_FPS)
     total_frames_in_video = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     
-    # Handle Frame Range & Duration
+    # Handle Frame Range
     start_frame = max(0, args.start_frame)
     if args.end_frame is None or args.end_frame > total_frames_in_video:
         end_frame = total_frames_in_video
@@ -162,7 +234,6 @@ def main():
             valid_boxes = res['bbox'].cpu().float().numpy() # [N, 4]
             valid_ids = res['id'].tolist()                  # [N]
             
-            # Directly retrieve embeddings (No helper needed anymore)
             active_embeds = res.get('embeddings', None)
 
             # --- C. MEMORY UPDATE ---
