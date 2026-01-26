@@ -73,7 +73,7 @@ def main():
         state_dict = ckpt['model_state_dict']
         
         # reconstruct a 'dummy' cfg object that build_model expects
-        # We assume standard defaults for things we didn't export (like backbone name)
+        # We add dummy training vars (LR, BATCH_SIZE) to satisfy the builder requirements
         deploy_cfg = {
             'NUM_CLASSES': model_args.get('num_classes', 2),
             'HIDDEN_DIM': model_args.get('hidden_dim', 256),
@@ -87,16 +87,23 @@ def main():
             'WITH_BOX_REFINE': model_args.get('with_box_refine', True),
             'TWO_STAGE': model_args.get('two_stage', False),
             'DEVICE': args.device,
-            # DEFAULTS (Since we didn't export these, we assume standard MOTIP/ResNet50)
+            
+            # DEFAULTS (Architectural)
             'BACKBONE': 'resnet50', 
             'MASKS': False,
             'DILATION': False,
             'POSITION_EMBEDDING': 'sine',
-            'CLIP_MAX_NORM': 0.1,
             'ACTIVATION': model_args.get('activation', 'relu'),
             'NUM_FEATURE_LEVELS': model_args.get('num_feature_levels', 4),
             'DEC_N_POINTS': model_args.get('dec_n_points', 4),
-            'ENC_N_POINTS': model_args.get('enc_n_points', 4)
+            'ENC_N_POINTS': model_args.get('enc_n_points', 4),
+            
+            # DUMMY TRAINING ARGS (Required by build_model but unused for inference)
+            'LR': 0.0001,
+            'LR_BACKBONE_SCALE': 0.1,
+            'BATCH_SIZE': 1,
+            'WEIGHT_DECAY': 0.0001,
+            'EPOCHS': 1,
         }
         
         # Use the existing factory function (Safe!)
