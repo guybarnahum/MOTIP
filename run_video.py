@@ -82,7 +82,12 @@ def main():
             'DEC_LAYERS': model_args.get('num_decoder_layers', 6),
             'DIM_FEEDFORWARD': model_args.get('dim_feedforward', 1024),
             'DROPOUT': 0.0,
+            
+            # --- FIX: Map the key exactly as expected by __init__.py ---
             'NUM_QUERIES': model_args.get('num_queries', 300),
+            'DETR_NUM_QUERIES': model_args.get('num_queries', 300), 
+            # -----------------------------------------------------------
+            
             'AUX_LOSS': False,
             'WITH_BOX_REFINE': model_args.get('with_box_refine', True),
             'TWO_STAGE': model_args.get('two_stage', False),
@@ -104,6 +109,8 @@ def main():
             'BATCH_SIZE': 1,
             'WEIGHT_DECAY': 0.0001,
             'EPOCHS': 1,
+            'LR_DROP': 1,
+            'CLIP_MAX_NORM': 0.1,
         }
         
         # Use the existing factory function (Safe!)
