@@ -41,6 +41,8 @@ def get_args():
     # Memory Settings
     parser.add_argument('--miss_tolerance', type=int, default=30, help="Short term tracker memory")
     parser.add_argument('--longterm_patience', type=int, default=9000, help="Long term gallery memory")
+    # NEW: Flag to disable memory
+    parser.add_argument('--no_memory', action='store_true', help="Disable LongTerm Memory ReID")
     
     return parser.parse_args()
 
@@ -76,9 +78,6 @@ def main():
         state_dict = ckpt['model_state_dict']
         
         # 1. Rebuild Backbone
-        # We wrap args in a simple namespace or dict wrapper if build_backbone expects one,
-        # but usually it takes direct args or a config dict. 
-        # Here we assume standard MOTIP build_backbone usage.
         backbone = build_backbone(model_args)
         
         # 2. Rebuild MOTIP
@@ -111,7 +110,6 @@ def main():
         print("🛠️  Detected Development Model (Requires Config)")
         
         if args.config_path is None:
-            # Fallback default if user forgot arg
             print("⚠️  No config provided. Trying default './configs/r50_motip_bdd100k.yaml'")
             args.config_path = './configs/r50_motip_bdd100k.yaml'
             
@@ -125,10 +123,8 @@ def main():
         # Merge Parent Configs
         if "SUPER_CONFIG_PATH" in cfg:
             print(f"🔗 Inheriting config from: {cfg['SUPER_CONFIG_PATH']}")
-            # Resolve path relative to current config or root
             super_path = cfg["SUPER_CONFIG_PATH"]
             if not os.path.exists(super_path):
-                # Try relative to the config file directory
                 config_dir = os.path.dirname(args.config_path)
                 super_path = os.path.join(config_dir, cfg["SUPER_CONFIG_PATH"])
             
@@ -137,8 +133,6 @@ def main():
                     base_cfg = yaml.safe_load(f_base)
                 base_cfg.update(cfg) 
                 cfg = base_cfg
-            else:
-                 print(f"⚠️ Warning: Could not find super config {cfg['SUPER_CONFIG_PATH']}")
 
         if 'DEVICE' not in cfg: cfg['DEVICE'] = args.device
         
@@ -146,7 +140,6 @@ def main():
         model = build_model(cfg)
         model = model[0] if isinstance(model, tuple) else model
         
-        # Load weights
         model.load_state_dict(ckpt.get('model', ckpt), strict=False)
 
     # --- END HYBRID LOGIC ---
@@ -155,7 +148,14 @@ def main():
     model.eval()
     
     # 3. Setup Modules
-    memory = LongTermMemory(patience=args.longterm_patience)
+    # NEW: Condition to disable memory
+    if args.no_memory:
+        memory = None
+        print("🧠 LongTerm Memory: DISABLED")
+    else:
+        memory = LongTermMemory(patience=args.longterm_patience)
+        print("🧠 LongTerm Memory: ENABLED")
+        
     annotator = Annotator()
     
     # 4. Video IO Setup
@@ -238,9 +238,9 @@ def main():
 
             # --- C. MEMORY UPDATE ---
             final_ids = []
-            if active_embeds is not None and len(valid_ids) > 0:
+            # NEW: Check if memory exists before updating
+            if memory is not None and active_embeds is not None and len(valid_ids) > 0:
                 id_map = memory.update(frame_idx, valid_ids, active_embeds)
-                # Map the IDs: If map exists use it, else use original ID
                 final_ids = [id_map.get(vid, vid) for vid in valid_ids]
             else:
                 final_ids = valid_ids
@@ -258,11 +258,17 @@ def main():
             # Count how many objects have a different final_id than their tracker id
             current_overrides_count = sum(1 for o, f in zip(valid_ids, final_ids) if o != f)
 
-            mem_stats = {
-                "gallery_size": len(memory.storage),
                 "active_overrides": current_overrides_count 
             }
 
+                    "gallery_size": len(memory.storage),
+                    "active_overrides": current_overrides_count 
+            else:
+                mem_stats = {
+                    "gallery_size": 0,
+                    "active_overrides": 0 
+                }
+                
             frame = annotator.draw_dashboard(frame, frame_idx, gpu_name, mem_stats)
 
             out.write(frame)
