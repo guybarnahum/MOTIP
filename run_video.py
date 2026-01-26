@@ -257,12 +257,13 @@ def main():
             # Calculate ACTIVE revivals for this specific frame only
             # Count how many objects have a different final_id than their tracker id
             current_overrides_count = sum(1 for o, f in zip(valid_ids, final_ids) if o != f)
-
-                "active_overrides": current_overrides_count 
-            }
-
+            
+            # NEW: Handle dashboard if memory is disabled
+            if memory is not None:
+                mem_stats = {
                     "gallery_size": len(memory.storage),
                     "active_overrides": current_overrides_count 
+                }
             else:
                 mem_stats = {
                     "gallery_size": 0,
