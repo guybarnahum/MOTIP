@@ -8,7 +8,6 @@ import sys
 sys.path.append(os.getcwd())
 
 # Import your model builder
-# Adjust this import based on where your 'build' function is located
 try:
     from models.motip import build as build_model
 except ImportError:
@@ -35,13 +34,11 @@ def export_deployment_model(args):
     with open(args.config, 'r') as f:
         cfg = yaml.safe_load(f)
         
-    # Handle parent configs (SUPER_CONFIG_PATH) logic if your yaml uses it
+    # Handle parent configs (SUPER_CONFIG_PATH) logic
     if "SUPER_CONFIG_PATH" in cfg:
-        # Resolve relative path of super config
         config_dir = os.path.dirname(args.config)
         super_path = os.path.join(config_dir, cfg["SUPER_CONFIG_PATH"])
         if not os.path.exists(super_path):
-             # Try relative to project root if local fail
              super_path = cfg["SUPER_CONFIG_PATH"]
              
         if os.path.exists(super_path):
@@ -55,7 +52,16 @@ def export_deployment_model(args):
 
     # 2. Build the model architecture (Empty shell)
     print("🏗️  Building model architecture...")
-    model, criterion, postprocessors = build_model(cfg)
+    
+    # --- FIX: Robust Unpacking ---
+    # Captures return values regardless of count (2 or 3)
+    build_result = build_model(cfg)
+    
+    if isinstance(build_result, tuple):
+        model = build_result[0]  # Model is always the first element
+    else:
+        model = build_result
+    # -----------------------------
     
     # 3. Load the heavy training weights
     print(f"⚖️  Loading weights from {args.checkpoint}...")
@@ -88,10 +94,8 @@ def export_deployment_model(args):
     model.eval()
 
     # 4. Create the "Deployment Payload"
-    # This dictionary replaces the need for config.yaml during inference.
     deploy_payload = {
         'model_state_dict': model.state_dict(),
-        # Save architecture args needed to instantiate class models.motip.MOTIP()
         'model_args': {
             'num_classes': cfg.get('NUM_CLASSES', 2),
             'hidden_dim': cfg.get('HIDDEN_DIM', 256),
@@ -99,7 +103,7 @@ def export_deployment_model(args):
             'num_encoder_layers': cfg.get('ENC_LAYERS', 6),
             'num_decoder_layers': cfg.get('DEC_LAYERS', 6),
             'dim_feedforward': cfg.get('DIM_FEEDFORWARD', 1024),
-            'dropout': 0.0, # Force dropout to 0 for inference safety
+            'dropout': 0.0, 
             'activation': cfg.get('ACTIVATION', 'relu'),
             'num_feature_levels': cfg.get('NUM_FEATURE_LEVELS', 4),
             'dec_n_points': cfg.get('DEC_N_POINTS', 4),
