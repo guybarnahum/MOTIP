@@ -13,17 +13,16 @@ def build(config: dict):
     
     # 1. Backbone & Optimization
     detr_args.backbone = config.get("BACKBONE", "resnet50")
-    # Safe calc for LR (default to 0 if missing)
     lr = config.get("LR", 0.0001)
     scale = config.get("LR_BACKBONE_SCALE", 0.1)
     detr_args.lr_backbone = lr * scale
     detr_args.dilation = config.get("DILATION", False)
     
     # 2. Transformer Architecture
-    detr_args.num_classes = config.get("NUM_CLASSES", 1)  # Default to 1 (person) if missing
+    detr_args.num_classes = config.get("NUM_CLASSES", 1)
     detr_args.device = config.get("DEVICE", "cuda")
     
-    # Robust Key Mapping (Try explicit DETR_ prefix first, fallback to simple keys)
+    # Robust Key Mapping
     detr_args.num_queries = config.get("DETR_NUM_QUERIES", config.get("NUM_QUERIES", 300))
     detr_args.num_feature_levels = config.get("DETR_NUM_FEATURE_LEVELS", config.get("NUM_FEATURE_LEVELS", 4))
     detr_args.aux_loss = config.get("DETR_AUX_LOSS", config.get("AUX_LOSS", True))
@@ -40,7 +39,7 @@ def build(config: dict):
     detr_args.dec_n_points = config.get("DETR_DEC_N_POINTS", config.get("DEC_N_POINTS", 4))
     detr_args.enc_n_points = config.get("DETR_ENC_N_POINTS", config.get("ENC_N_POINTS", 4))
 
-    # 3. Loss Coefficients (Defaults to 0 or standard vals if missing)
+    # 3. Loss Coefficients
     detr_args.cls_loss_coef = config.get("DETR_CLS_LOSS_COEF", 2.0)
     detr_args.bbox_loss_coef = config.get("DETR_BBOX_LOSS_COEF", 5.0)
     detr_args.giou_loss_coef = config.get("DETR_GIOU_LOSS_COEF", 2.0)
@@ -65,20 +64,22 @@ def build(config: dict):
     if not only_detr:
         _trajectory_modeling = TrajectoryModeling(
             detr_dim=detr_args.hidden_dim,
-            ffn_dim_ratio=config.get("FFN_DIM_RATIO", 4.0),
-            feature_dim=config.get("FEATURE_DIM", 256),
+            # FIX: Change 4.0 (float) to 4 (int)
+            ffn_dim_ratio=config.get("FFN_DIM_RATIO", 4),
+            feature_dim=int(config.get("FEATURE_DIM", 256)),
         )
         
     # 2. ID Decoder
     _id_decoder = None
     if not only_detr:
         _id_decoder = IDDecoder(
-            feature_dim=config.get("FEATURE_DIM", 256),
+            feature_dim=int(config.get("FEATURE_DIM", 256)),
             id_dim=config.get("ID_DIM", 128),
-            ffn_dim_ratio=config.get("FFN_DIM_RATIO", 4.0),
+            # FIX: Change 4.0 (float) to 4 (int)
+            ffn_dim_ratio=config.get("FFN_DIM_RATIO", 4),
             num_layers=config.get("NUM_ID_DECODER_LAYERS", 6),
             head_dim=config.get("HEAD_DIM", 256),
-            num_id_vocabulary=config.get("NUM_ID_VOCABULARY", 1000), # Default vocab size
+            num_id_vocabulary=config.get("NUM_ID_VOCABULARY", 1000),
             rel_pe_length=config.get("REL_PE_LENGTH", 50),
             use_aux_loss=config.get("USE_AUX_LOSS", True),
             use_shared_aux_head=config.get("USE_SHARED_AUX_HEAD", True),
