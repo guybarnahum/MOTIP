@@ -72,30 +72,74 @@ def main():
         model_args = ckpt['model_args']
         state_dict = ckpt['model_state_dict']
         
-        # Now we only pass what we actually know/need.
-        # The updated __init__.py handles the defaults.
+        # reconstruct a 'dummy' cfg object that build_model expects
+        # We map the saved args (snake_case) to the config keys (Upper_Snake_Case)
         deploy_cfg = {
+            # --- DETR / Transformer Args ---
             'NUM_CLASSES': model_args.get('num_classes', 2),
             'HIDDEN_DIM': model_args.get('hidden_dim', 256),
+            'DETR_HIDDEN_DIM': model_args.get('hidden_dim', 256),
             'NHEADS': model_args.get('nheads', 8),
+            'DETR_NUM_HEADS': model_args.get('nheads', 8),
             'ENC_LAYERS': model_args.get('num_encoder_layers', 6),
+            'DETR_ENC_LAYERS': model_args.get('num_encoder_layers', 6),
             'DEC_LAYERS': model_args.get('num_decoder_layers', 6),
+            'DETR_DEC_LAYERS': model_args.get('num_decoder_layers', 6),
             'DIM_FEEDFORWARD': model_args.get('dim_feedforward', 1024),
-            'NUM_QUERIES': model_args.get('num_queries', 300),
-            'AUX_LOSS': False,
-            'WITH_BOX_REFINE': model_args.get('with_box_refine', True),
-            'TWO_STAGE': model_args.get('two_stage', False),
-            'DEVICE': args.device,
+            'DETR_DIM_FEEDFORWARD': model_args.get('dim_feedforward', 1024),
             'DROPOUT': 0.0,
+            'DETR_DROPOUT': 0.0,
             
-            # Explicitly map keys that might have different names in export vs init
+            # --- Specific Keys with Prefixes ---
+            'NUM_QUERIES': model_args.get('num_queries', 300),
+            'DETR_NUM_QUERIES': model_args.get('num_queries', 300), 
+            'NUM_FEATURE_LEVELS': model_args.get('num_feature_levels', 4),
             'DETR_NUM_FEATURE_LEVELS': model_args.get('num_feature_levels', 4),
             'DETR_DEC_N_POINTS': model_args.get('dec_n_points', 4),
             'DETR_ENC_N_POINTS': model_args.get('enc_n_points', 4),
+            'AUX_LOSS': False,
+            'DETR_AUX_LOSS': False,
+            'WITH_BOX_REFINE': model_args.get('with_box_refine', True),
+            'DETR_WITH_BOX_REFINE': model_args.get('with_box_refine', True),
+            'TWO_STAGE': model_args.get('two_stage', False),
+            'DETR_TWO_STAGE': model_args.get('two_stage', False),
+            
+            # --- MOTIP Specific Args (CRITICAL FIX) ---
+            # Explicit int casting to prevent TypeErrors in nn.Linear
+            'FEATURE_DIM': int(model_args.get('feature_dim', 256)),
+            'ID_DIM': int(model_args.get('id_dim', 128)),
+            'FFN_DIM_RATIO': int(model_args.get('ffn_dim_ratio', 4)),
+            'NUM_ID_DECODER_LAYERS': int(model_args.get('num_id_decoder_layers', 6)),
+            'HEAD_DIM': int(model_args.get('head_dim', 256)),
+            'NUM_ID_VOCABULARY': int(model_args.get('num_id_vocabulary', 1000)),
+            'REL_PE_LENGTH': int(model_args.get('rel_pe_length', 50)),
+            'USE_AUX_LOSS': model_args.get('use_aux_loss', True),
+            'USE_SHARED_AUX_HEAD': model_args.get('use_shared_aux_head', True),
+            
+            # --- DEFAULTS (Architectural) ---
+            'DEVICE': args.device,
+            'BACKBONE': 'resnet50', 
+            'MASKS': False, 'DETR_MASKS': False,
+            'DILATION': False,
+            'POSITION_EMBEDDING': 'sine', 'DETR_POSITION_EMBEDDING': 'sine',
+            'ACTIVATION': model_args.get('activation', 'relu'),
+            
+            # --- DUMMY TRAINING ARGS ---
+            # (Required by build_model but unused for inference)
+            'LR': 0.0001, 'LR_BACKBONE_SCALE': 0.1, 'BATCH_SIZE': 1,
+            'WEIGHT_DECAY': 0.0001, 'EPOCHS': 1, 'LR_DROP': 1,
+            'CLIP_MAX_NORM': 0.1,
+            'DETR_CLS_LOSS_COEF': 2.0, 'DETR_BBOX_LOSS_COEF': 5.0,
+            'DETR_GIOU_LOSS_COEF': 2.0, 'DETR_FOCAL_ALPHA': 0.25,
+            'DETR_SET_COST_CLASS': 2.0, 'DETR_SET_COST_BBOX': 5.0,
+            'DETR_SET_COST_GIOU': 2.0,
         }
         
+        # Use the existing factory function (Safe!)
         model = build_model(deploy_cfg)
         model = model[0] if isinstance(model, tuple) else model
+        
+        # Load state dict
         model.load_state_dict(state_dict, strict=False)
         print("✅ Model built successfully from embedded args.")
 
@@ -116,6 +160,7 @@ def main():
         with open(args.config_path, 'r') as f:
             cfg = yaml.safe_load(f)
 
+        # Merge Parent Configs
         if "SUPER_CONFIG_PATH" in cfg:
             print(f"🔗 Inheriting config from: {cfg['SUPER_CONFIG_PATH']}")
             super_path = cfg["SUPER_CONFIG_PATH"]
@@ -134,6 +179,7 @@ def main():
         print("🏗️  Building model from YAML...")
         model = build_model(cfg)
         model = model[0] if isinstance(model, tuple) else model
+        
         model.load_state_dict(ckpt.get('model', ckpt), strict=False)
 
     # --- END HYBRID LOGIC ---
@@ -161,6 +207,7 @@ def main():
     fps = cap.get(cv2.CAP_PROP_FPS)
     total_frames_in_video = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     
+    # Handle Frame Range
     start_frame = max(0, args.start_frame)
     if args.end_frame is None or args.end_frame > total_frames_in_video:
         end_frame = total_frames_in_video
@@ -189,6 +236,7 @@ def main():
     temp_out = "temp_" + os.path.basename(args.output_path)
     out = cv2.VideoWriter(temp_out, cv2.VideoWriter_fourcc(*'mp4v'), fps, (W, H))
     
+    # Image Normalization Stats
     mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(1, 3, 1, 1)
     std = torch.tensor([0.229, 0.224, 0.225], device=device).view(1, 3, 1, 1)
     if args.fp16: mean, std = mean.half(), std.half()
@@ -199,7 +247,8 @@ def main():
     
     try:
         while cap.isOpened() and frame_idx < end_frame:
-            loop_start = time.time() 
+            loop_start = time.time() # Start timer
+            
             ret, frame = cap.read()
             if not ret: break
 
@@ -207,6 +256,7 @@ def main():
             t_img = torch.from_numpy(frame).to(device).permute(2, 0, 1).float() / 255.0
             if args.fp16: t_img = t_img.half()
             
+            # Smart Resize
             h, w = t_img.shape[1:]
             scale = 800 / min(h, w)
             if max(h, w) * scale > 1333: scale = 1333 / max(h, w)
@@ -220,8 +270,8 @@ def main():
             
             # --- B. DATA EXTRACTION ---
             res = tracker.get_track_results()
-            valid_boxes = res['bbox'].cpu().float().numpy() 
-            valid_ids = res['id'].tolist()                  
+            valid_boxes = res['bbox'].cpu().float().numpy() # [N, 4]
+            valid_ids = res['id'].tolist()                  # [N]
             
             active_embeds = res.get('embeddings', None)
 
