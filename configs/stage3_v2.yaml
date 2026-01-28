@@ -1,0 +1,76 @@
+# configs/stage3_v2.yaml
+
+# ------------------------------------------------------------------------
+# STAGE 3: GENERALIZATION & SMALL OBJECTS (15k Frames w/ VisDrone)
+# Goal: Adapt to aerial views (VisDrone) and robustify tracking for small objects
+# ------------------------------------------------------------------------
+
+# Base Architecture (Inherit from DanceTrack)
+SUPER_CONFIG_PATH: ./configs/r50_deformable_detr_motip_dancetrack.yaml
+root_path: "."
+
+# Dataset & Classes
+# ⚠️ CRITICAL: Must remain 2. Do not change.
+NUM_CLASSES: 2
+
+# Weights Initialization
+# ⚠️ CRITICAL: Load the "Gold Master" weights from Stage 2
+DETR_PRETRAIN: "pretrains/motip_stage2_v2.pth"
+
+# Reset optimizer/scheduler because we are introducing a radically different
+# domain (VisDrone aerial view) which changes the gradient landscape.
+RESUME_OPTIMIZER: False
+RESUME_SCHEDULER: False
+
+# ------------------------------------------------------------------------
+# Generalization Training Strategy
+# ------------------------------------------------------------------------
+EPOCHS: 10
+
+# Even Lower Learning Rate for Fine-Tuning
+# Stage 2 used 1.0e-5. Stage 3 uses 5.0e-6 to gently integrate VisDrone
+# without catastrophic forgetting of BDD/DanceTrack.
+LR: 5.0e-6          
+LR_DROP: 7          # Drop at epoch 7
+LR_BACKBONE: 1.0e-6 # Keep backbone very stable
+
+LR_WARMUP_EPOCHS: 0
+
+# Sampling Strategy (Keep consistent)
+sampler_lengths: [5]
+sample_intervals: [2, 3]
+
+# ------------------------------------------------------------------------
+# Hardware Safety (A10G / 24GB VRAM)
+# ------------------------------------------------------------------------
+BATCH_SIZE: 1
+ACCUMULATE_STEPS: 4       # Effective Batch Size = 4
+NUM_WORKERS: 4
+
+MEMORY_EFFICIENT: True
+USE_DECODER_CHECKPOINT: True
+
+# Image Resolution Limits (Adjusted for Small Objects)
+# VisDrone objects are tiny. We slightly increase resolution to detect them better.
+# Previous: 1000 max. New: 1100 max.
+AUG_MAX_SIZE: 1100
+# Shifted scales slightly higher for small object visibility
+AUG_RESIZE_SCALES: [512, 544, 576, 608, 640, 672]
+AUG_RANDOM_RESIZE: [500, 600, 700]
+
+# Output Directories (Handled automatically)
+OUTPUT_DIR: null
+OUTPUTS_DIR: null
+
+# ------------------------------------------------------------------------
+# Validation Config
+# ------------------------------------------------------------------------
+val_config:
+  GT_FOLDER: "./datasets/DanceTrack/val"
+  SEQMAP_FILE: "./datasets/DanceTrack/val_seqmap.txt"
+  SPLIT_TO_EVAL: "val"
+  
+  CLASSES_TO_EVAL: ['pedestrian', 'car'] 
+  CLASS_NAME_TO_ID: 
+    pedestrian: 1
+    car: 2
