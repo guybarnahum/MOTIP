@@ -61,7 +61,8 @@ def append_annotation(
         if key not in annotation:
             annotation[key] = class_label
         else:
-            annotation[key] = torch.cat([annotation[key], class_label], dim=0)
+            # IMPORTANT: Concatenate on dim=2 to increase the number of objects (N)
+            annotation[key] = torch.cat([annotation[key], class_label], dim=2)
     # --------------------------------------------
 
     return annotation
