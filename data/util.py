@@ -50,6 +50,20 @@ def append_annotation(
         annotation["visibility"],
         torch.tensor([visibility], dtype=torch.float32)
     ])
+
+    # --- ADDED FOR MULTI-CLASS MOTIP SUPPORT ---
+    # Shape logic: (N, 1, 1) is typically expected by the prepare_for_motip method
+    traj_label = torch.tensor([[[category]]], dtype=torch.int64)
+    if "trajectory_class_labels" not in annotation:
+        annotation["trajectory_class_labels"] = traj_label
+    else:
+        # Concatenate along the first dimension (N)
+        annotation["trajectory_class_labels"] = torch.cat([
+            annotation["trajectory_class_labels"], 
+            traj_label
+        ], dim=0)
+    # --------------------------------------------
+
     return annotation
 
 
@@ -107,6 +121,15 @@ def collate_fn(batch):
                     annotations[b][t]["unknown_times"],
                     t * torch.ones((_G, 1, max_N - _N), dtype=torch.int64)
                 ], dim=-1)
+
+                # --- ADDED: PADDING FOR TRAJECTORY CLASS LABELS ---
+                if "trajectory_class_labels" in annotations[b][t]:
+                    # Usually uses -1 to denote padded/ignore areas for loss
+                    annotations[b][t]["trajectory_class_labels"] = torch.cat([
+                        annotations[b][t]["trajectory_class_labels"],
+                        - torch.ones((_G, 1, max_N - _N), dtype=torch.int64)
+                    ], dim=-1)
+                # --------------------------------------------------
             pass
     return {
         "images": nested_tensor,

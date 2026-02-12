@@ -122,9 +122,8 @@ class DanceTrack(OneDataset):
         for sequence_name in sequence_names:
             for i in range(self.sequence_infos[sequence_name]["length"]):
                 annotations[sequence_name][i]["is_legal"] = is_legal(annotations[sequence_name][i])
-        
         return annotations 
-
+    
     def _init_annotations(self, sequence_names):
         annotations = dict()
         for sequence_name in sequence_names:
@@ -135,6 +134,7 @@ class DanceTrack(OneDataset):
                     "category": torch.zeros((0, ), dtype=torch.int64),
                     "bbox": torch.zeros((0, 4), dtype=torch.float32),
                     "visibility": torch.zeros((0, ), dtype=torch.float32),
+                    "trajectory_class_labels": torch.zeros((0, 1, 1), dtype=torch.int64), 
+                    "trajectory_is_legal": torch.zeros((0, ), dtype=torch.bool),
                 })
-        
         return annotations
