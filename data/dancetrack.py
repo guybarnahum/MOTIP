@@ -138,3 +138,4 @@ class DanceTrack(OneDataset):
                     "trajectory_is_legal": torch.zeros((0, ), dtype=torch.bool),
                 })
         return annotations
+
