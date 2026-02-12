@@ -54,8 +54,8 @@ fi
 
 # --- 3. Construct the Pipeline Command ---
 # Step A: Training
-# stdbuf -oL ensures the output isn't buffered so plot_dashboard can see updates immediately
-TRAIN_CMD="stdbuf -oL -eL PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True accelerate launch --mixed_precision=fp16 --num_processes=1 train.py --config-path $ABS_CONFIG_PATH --exp-name $UNIQUE_EXP_NAME"
+# FIX: Added 'env' so stdbuf can handle the environment variable assignment
+TRAIN_CMD="stdbuf -oL -eL env PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True accelerate launch --mixed_precision=fp16 --num_processes=1 train.py --config-path $ABS_CONFIG_PATH --exp-name $UNIQUE_EXP_NAME"
 
 # Step B: Post-Processing (Call the separate script)
 POST_CMD="./train-post.sh $ABS_CONFIG_PATH $OUTPUT_ROOT $LOG_FILE"
