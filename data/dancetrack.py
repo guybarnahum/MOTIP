@@ -91,12 +91,14 @@ class DanceTrack(OneDataset):
                     frame_id, raw_obj_id = map(int, [frame_id, raw_obj_id])
                     x, y, w, h = map(float, [x, y, w, h])
                     
-                    # CHANGE: Use the actual class_id from the file instead of hardcoded 0
-                    # Standard MOT format usually uses 1 for pedestrian, 2-7+ for vehicles
-                        if category == 1: # Person
+                    category = int(class_id) 
+
+                    # --- MAP RAW ID TO VOCABULARY RANGE ---
+                    if (raw_obj_id, category) not in id_map:
+                        if category == 1:  # Person
                             id_map[(raw_obj_id, category)] = next_person_idx
                             next_person_idx = (next_person_idx + 1) % 500
-                        else: # Vehicle (Class 2)
+                        else:  # Vehicle
                             id_map[(raw_obj_id, category)] = next_vehicle_idx
                             # Ensure vehicle index stays within 500-999
                             next_vehicle_idx = 500 + ((next_vehicle_idx - 500 + 1) % 500)
@@ -106,8 +108,8 @@ class DanceTrack(OneDataset):
                     
                     bbox = [x, y, w, h]
                     visibility = 1.0
-                    ann_index = frame_id - 1    # 0-indexed for annotations
-                    # Organized into the annotations:
+                    ann_index = frame_id - 1
+                    
                     annotations[sequence_name][ann_index] = append_annotation(
                         annotation=annotations[sequence_name][ann_index],
                         obj_id=obj_id,
@@ -115,11 +117,13 @@ class DanceTrack(OneDataset):
                         bbox=bbox,
                         visibility=visibility,
                     )
+        
         # Determine whether each annotation is legal:
         for sequence_name in sequence_names:
             for i in range(self.sequence_infos[sequence_name]["length"]):
                 annotations[sequence_name][i]["is_legal"] = is_legal(annotations[sequence_name][i])
-        return annotations
+        
+        return annotations 
 
     def _init_annotations(self, sequence_names):
         annotations = dict()
@@ -132,4 +136,5 @@ class DanceTrack(OneDataset):
                     "bbox": torch.zeros((0, 4), dtype=torch.float32),
                     "visibility": torch.zeros((0, ), dtype=torch.float32),
                 })
+        
         return annotations
