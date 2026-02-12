@@ -98,6 +98,11 @@ class IDDecoder(nn.Module):
         unknown_features = seq_info["unknown_features"]
         trajectory_id_labels = seq_info["trajectory_id_labels"]
         unknown_id_labels = seq_info["unknown_id_labels"] if "unknown_id_labels" in seq_info else None
+        
+        # Multi-class support: extract class labels for gating
+        trajectory_class_labels = seq_info["trajectory_class_labels"]
+        unknown_class_labels = seq_info["unknown_class_labels"]
+
         trajectory_times = seq_info["trajectory_times"]
         unknown_times = seq_info["unknown_times"]
         trajectory_masks = seq_info["trajectory_masks"]
@@ -116,7 +121,18 @@ class IDDecoder(nn.Module):
         cross_attn_key_padding_mask = einops.rearrange(trajectory_masks, "b g t n -> (b g) (t n)").contiguous()
         _trajectory_times_flatten = einops.rearrange(trajectory_times, "b g t n -> (b g) (t n)")
         _unknown_times_flatten = einops.rearrange(unknown_times, "b g t n -> (b g) (t n)")
+        
+        # Temporal Cross-Attn Mask
         cross_attn_mask = _trajectory_times_flatten[:, None, :] >= _unknown_times_flatten[:, :, None]
+
+        # --- MULTI-CLASS GATING LOGIC ---
+        _traj_cls_flatten = einops.rearrange(trajectory_class_labels, "b g t n -> (b g) (t n)")
+        _unk_cls_flatten = einops.rearrange(unknown_class_labels, "b g t n -> (b g) (t n)")
+        # Block if classes are different (Infinity Cost)
+        class_mismatch_mask = _unk_cls_flatten[:, :, None] != _traj_cls_flatten[:, None, :]
+        cross_attn_mask = cross_attn_mask | class_mismatch_mask
+        # --------------------------------
+
         cross_attn_mask = einops.repeat(cross_attn_mask, "bg tn1 tn2 -> (bg n_heads) tn1 tn2", n_heads=self.n_heads).contiguous()
         # Prepare for rel PE:
         self.rel_pos_map = self.rel_pos_map.to(trajectory_features.device)
@@ -169,6 +185,17 @@ class IDDecoder(nn.Module):
                 )
 
             _unknown_id_logits = self.embed_to_word_layers[layer](unknown_embeds[..., -self.id_dim:])
+
+            # --- ID DICTIONARY RANGE SPLITTING ---
+            # Partition: 0-499 Person, 500-999 Car
+            person_mask = (unknown_class_labels == 1).unsqueeze(-1)
+            car_mask = (unknown_class_labels == 2).unsqueeze(-1)
+            
+            # Mask out invalid ID ranges per class
+            _unknown_id_logits[..., 500:1000] = torch.where(person_mask, torch.tensor(float("-inf"), device=unknown_embeds.device), _unknown_id_logits[..., 500:1000])
+            _unknown_id_logits[..., 0:500] = torch.where(car_mask, torch.tensor(float("-inf"), device=unknown_embeds.device), _unknown_id_logits[..., 0:500])
+            # --------------------------------------
+
             _unknown_id_masks = unknown_masks.clone()
             _unknown_id_labels = None if not self.training else unknown_id_labels
             if all_unknown_id_logits is None:

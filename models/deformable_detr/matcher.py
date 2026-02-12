@@ -87,8 +87,16 @@ class HungarianMatcher(nn.Module):
             cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox),
                                              box_cxcywh_to_xyxy(tgt_bbox))
 
+            # --- ENHANCEMENT: CATEGORY-PURE MATCHING ---
+            # Create a mask where predicted class != target class
+            # This ensures that a prediction is only matched to a target of the same category.
+            out_classes = out_prob.argmax(dim=-1)
+            class_mismatch = out_classes.unsqueeze(1) != tgt_ids.unsqueeze(0)
+            cost_blocker = class_mismatch.float() * 1000.0 
+            # --------------------------------------------
+
             # Final cost matrix
-            C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
+            C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou + cost_blocker
             C = C.view(bs, num_queries, -1).cpu()
 
             sizes = [len(v["boxes"]) for v in targets]

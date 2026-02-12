@@ -97,6 +97,15 @@ def train_engine(config: dict):
 
     # Build MOTIP model:
     model, detr_criterion = build_motip(config=config)
+    
+    # --- MULTI-CLASS ARCHITECTURE VERIFICATION ---
+    if accelerator.is_main_process:
+        print(f"\n🚀 [SYSTEM] Initializing Multi-Class MOTIP Engine")
+        print(f"   - Classes Detected: {config['NUM_CLASSES']} (Person + Vehicle)")
+        print(f"   - ID Vocabulary: {config['NUM_ID_VOCABULARY']} (Split: 0-499 / 500-999)")
+        print(f"   - Network Logic: Two Logical ID Heads active via Search Space Partitioning.\n")
+    # ---------------------------------------------
+
     # Load the pre-trained DETR:
     load_detr_pretrain(
         model=model, pretrain_path=config["DETR_PRETRAIN"], num_classes=config["NUM_CLASSES"],
@@ -195,16 +204,34 @@ def train_engine(config: dict):
         train_metrics["lr"].update(lr)
         train_metrics["lr"].sync()
         time_per_epoch = TPS.format(TPS.timestamp() - epoch_start_timestamp)
-        logger.metrics(
-            log=f"[Finish epoch: {epoch}] [Time: {time_per_epoch}] ",
-            metrics=train_metrics,
-            fmt="{global_average:.4f}",
-            statistic="global_average",
-            global_step=train_states["global_step"],
-            prefix="epoch",
-            x_axis_step=epoch,
-            x_axis_name="epoch",
-        )
+        
+        # --- ENHANCED LOGGING FOR DASHBOARD ---
+        if accelerator.is_main_process:
+            class_error = train_metrics["class_error"].global_average if "class_error" in train_metrics else 0.0
+            
+            # 1. This one is for your plot_dashboard.py script (Clean string in train.log)
+            dashboard_log = (
+                f"[Finish epoch: {epoch}] [Time: {time_per_epoch}] "
+                f"loss = {train_metrics['loss'].global_average:.4f}; "
+                f"detr_loss = {train_metrics['detr_loss'].global_average:.4f}; "
+                f"id_loss = {train_metrics['id_loss'].global_average:.4f}; "
+                f"class_error = {class_error:.4f}; "
+                f"detr_grad_norm = {train_metrics['detr_grad_norm'].global_average:.4f};"
+            )
+            logger.info(dashboard_log)
+            
+            # 2. This one is for WandB / Structured Logging (Original Logic)
+            logger.metrics(
+                log=f"[Finish epoch: {epoch}] [Time: {time_per_epoch}] ",
+                metrics=train_metrics,
+                fmt="{global_average:.4f}",
+                statistic="global_average",
+                global_step=train_states["global_step"],
+                prefix="epoch",
+                x_axis_step=epoch,
+                x_axis_name="epoch",
+            )
+        # --------------------------------------
 
         # Save checkpoint:
         if (epoch + 1) % config["SAVE_CHECKPOINT_PER_EPOCH"] == 0:
@@ -316,6 +343,18 @@ def train_one_epoch(
                 torch.cuda.empty_cache()
             
             images, annotations, metas = samples["images"], samples["annotations"], samples["metas"]
+
+            # --- DEBUG: MULTI-CLASS RUNTIME VERIFICATION ---
+            if step % 100 == 0 and accelerator.is_main_process:
+                # Count instances in the first video of the batch across all frames
+                batch_cats = torch.cat([torch.as_tensor(ann['category']) for ann in annotations[0]])
+                p_count = (batch_cats == 1).sum().item()
+                v_count = (batch_cats == 2).sum().item()
+                print(f"\n🔍 [DEBUG Step {step}] Batch Verification: People={p_count} | Vehicles={v_count}")
+                if p_count == 0 and v_count == 0:
+                    print("⚠️  Warning: Current batch contains no labeled objects!")
+            # -----------------------------------------------
+
             # Normalize the images:
             # (Normally, it should be done in the dataloader, but here we do it in the training loop (on cuda).)
             mean = [0.485, 0.456, 0.406]
@@ -432,7 +471,13 @@ def train_one_epoch(
                     part="id_decoder",
                     use_decoder_checkpoint=use_decoder_checkpoint,
                 )
-                id_loss = id_criterion(id_logits=id_logits, id_labels=id_gts, id_masks=id_masks)
+                # Pass unknown_class_labels to id_criterion for multi-class support:
+                id_loss = id_criterion(
+                    id_logits=id_logits, 
+                    id_labels=id_gts, 
+                    id_masks=id_masks,
+                    id_categories=seq_info["unknown_class_labels"]
+                )
                 _num_gts_per_frame = max(_num_gts_per_frame, id_gts.shape[-1])
                 # print(f"Num of GTs per frame: {_num_gts_per_frame}")
                 pass
@@ -452,6 +497,8 @@ def train_one_epoch(
                 metrics.update(name="detr_loss", value=detr_loss.item())
                 if id_loss is not None:
                     metrics.update(name="id_loss", value=id_loss.item())
+                if "class_error" in detr_loss_dict:
+                    metrics.update(name="class_error", value=detr_loss_dict["class_error"].item())
                 for k, v in detr_loss_dict.items():
                     metrics.update(name=k, value=v.item())
                 
@@ -690,11 +737,13 @@ def prepare_for_motip(detr_outputs, annotations, detr_indices):
     _feature_dim = detr_outputs["outputs"].shape[-1]
     # Init corresponding variables:
     trajectory_id_labels = - torch.ones((_B, _G, _T, _N), dtype=torch.int64, device=_device)
+    trajectory_class_labels = - torch.ones((_B, _G, _T, _N), dtype=torch.int64, device=_device)
     trajectory_times = - torch.ones((_B, _G, _T, _N), dtype=torch.int64, device=_device)
     trajectory_masks = torch.ones((_B, _G, _T, _N), dtype=torch.bool, device=_device)
     trajectory_boxes = torch.zeros((_B, _G, _T, _N, 4), dtype=torch.float32, device=_device)
     trajectory_features = torch.zeros((_B, _G, _T, _N, _feature_dim), dtype=torch.float32, device=_device)
     unknown_id_labels = - torch.ones((_B, _G, _T, _N), dtype=torch.int64, device=_device)
+    unknown_class_labels = - torch.ones((_B, _G, _T, _N), dtype=torch.int64, device=_device)
     unknown_times = - torch.ones((_B, _G, _T, _N), dtype=torch.int64, device=_device)
     unknown_masks = torch.ones((_B, _G, _T, _N), dtype=torch.bool, device=_device)
     unknown_boxes = torch.zeros((_B, _G, _T, _N, 4), dtype=torch.float32, device=_device)
@@ -714,7 +763,9 @@ def prepare_for_motip(detr_outputs, annotations, detr_indices):
                 _curr_unk_masks = annotations[b][t]["unknown_id_masks"][group, 0, :]
                 # Fill the fields:
                 trajectory_id_labels[b, group, t] = annotations[b][t]["trajectory_id_labels"][group, 0, :]
+                trajectory_class_labels[b, group, t] = annotations[b][t]["trajectory_class_labels"][group, 0, :]
                 unknown_id_labels[b, group, t] = annotations[b][t]["unknown_id_labels"][group, 0, :]
+                unknown_class_labels[b, group, t] = annotations[b][t]["unknown_class_labels"][group, 0, :]
                 trajectory_times[b, group, t] = annotations[b][t]["trajectory_times"][group, 0, :]
                 unknown_times[b, group, t] = annotations[b][t]["unknown_times"][group, 0, :]
                 trajectory_masks[b, group, t] = _curr_traj_masks
@@ -727,11 +778,13 @@ def prepare_for_motip(detr_outputs, annotations, detr_indices):
             pass
     return {
         "trajectory_id_labels": trajectory_id_labels,
+        "trajectory_class_labels": trajectory_class_labels,
         "trajectory_times": trajectory_times,
         "trajectory_masks": trajectory_masks,
         "trajectory_boxes": trajectory_boxes,
         "trajectory_features": trajectory_features,
         "unknown_id_labels": unknown_id_labels,
+        "unknown_class_labels": unknown_class_labels,
         "unknown_times": unknown_times,
         "unknown_masks": unknown_masks,
         "unknown_boxes": unknown_boxes,

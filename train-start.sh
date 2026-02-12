@@ -8,17 +8,19 @@ if [ -z "$1" ]; then
 fi
 
 CONFIG_PATH="$1"
+# Ensure we are using absolute paths for tmux reliability
+ABS_CONFIG_PATH=$(readlink -f "$CONFIG_PATH")
 
-if [ ! -f "$CONFIG_PATH" ]; then
-    echo "❌ Error: Config file not found at: $CONFIG_PATH"
+if [ ! -f "$ABS_CONFIG_PATH" ]; then
+    echo "❌ Error: Config file not found at: $ABS_CONFIG_PATH"
     exit 1
 fi
 
 # Verify Dataset Existence (sanity check)
-DATASET_PATH=$(grep "GT_FOLDER" "$CONFIG_PATH" | head -n 1 | awk -F': ' '{print $2}' | tr -d '"' | tr -d "'" | tr -d " ")
+DATASET_PATH=$(grep "GT_FOLDER" "$ABS_CONFIG_PATH" | head -n 1 | awk -F': ' '{print $2}' | tr -d '"' | tr -d "'" | tr -d " ")
 if [ ! -z "$DATASET_PATH" ] && [ ! -d "$DATASET_PATH" ]; then
     echo "❌ Error: Dataset folder not found at: $DATASET_PATH"
-    echo "   (Checked GT_FOLDER value in $CONFIG_PATH)"
+    echo "   (Checked GT_FOLDER value in $ABS_CONFIG_PATH)"
     exit 1
 fi
 
@@ -35,7 +37,7 @@ LOG_FILE="${OUTPUT_ROOT}/train.log"
 touch "$LOG_FILE" 
 
 echo "========================================================"
-echo "⚙️  Config:  $CONFIG_PATH"
+echo "⚙️  Config:  $ABS_CONFIG_PATH"
 echo "📂 Output:  $OUTPUT_ROOT"
 echo "📝 Log:     $LOG_FILE"
 echo "🏷️  ExpID:   $UNIQUE_EXP_NAME"
@@ -52,17 +54,35 @@ fi
 
 # --- 3. Construct the Pipeline Command ---
 # Step A: Training
-TRAIN_CMD="PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True accelerate launch --mixed_precision=fp16 --num_processes=1 train.py --config-path $CONFIG_PATH --exp-name $UNIQUE_EXP_NAME"
+# stdbuf -oL ensures the output isn't buffered so plot_dashboard can see updates immediately
+TRAIN_CMD="stdbuf -oL -eL PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True accelerate launch --mixed_precision=fp16 --num_processes=1 train.py --config-path $ABS_CONFIG_PATH --exp-name $UNIQUE_EXP_NAME"
 
 # Step B: Post-Processing (Call the separate script)
-POST_CMD="./train-post.sh $CONFIG_PATH $OUTPUT_ROOT $LOG_FILE"
+POST_CMD="./train-post.sh $ABS_CONFIG_PATH $OUTPUT_ROOT $LOG_FILE"
 
-# Combined Command
+# Step C: Auto-Dashboard (30 min refresh + Final Sweep)
+# Logic: While the training process is found in the process list, update every 1800s.
+# Once training finishes, run one final update to catch the last epoch metrics.
+INTERVAL=1800
+DASH_CMD="sleep 15; while pgrep -f '$UNIQUE_EXP_NAME' > /dev/null; do python plot_dashboard.py $LOG_FILE; echo \"Dashboard updated at \$(date). Next update in 30m...\"; sleep $INTERVAL; done; python plot_dashboard.py $LOG_FILE; echo '✅ Training finished. Final dashboard generated.'"
+
+# Combined Command for Pane 0
+# We use ';' to ensure POST_CMD runs even if TRAIN_CMD had an error (to see partial results)
 FINAL_CMD="$TRAIN_CMD 2>&1 | tee $LOG_FILE; $POST_CMD"
 
 # --- 4. Launch ---
+# Create session in background
 tmux new-session -d -s "$SESSION_NAME"
+
+# Pane 0: Primary Training and Post-Processing
 tmux send-keys -t "$SESSION_NAME" "$FINAL_CMD" C-m
+
+# Pane 1: Split horizontally and run the Dashboard Monitor
+tmux split-window -h -t "$SESSION_NAME"
+tmux send-keys -t "$SESSION_NAME" "$DASH_CMD" C-m
+
+# Return focus to the training pane
+tmux select-pane -t 0
 
 echo "✅ Training launched!"
 echo "   To view output: tmux attach -t $SESSION_NAME"

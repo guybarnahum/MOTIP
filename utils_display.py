@@ -62,44 +62,54 @@ class Annotator:
         
         return frame
 
-    def draw_tracks(self, frame, boxes, final_ids, original_ids=None):
+    def draw_tracks(self, frame, boxes, final_ids, categories, original_ids=None):
         """
         Compact drawing: 'ID 5' or 'ID 5 > 50'.
-        Uses standard track color for box and label background.
+        Now supports category-based color palettes and labels.
+        categories: list of int (1 for Person, 2 for Vehicle)
         """
         if original_ids is None: original_ids = final_ids
+
+        # Mapping for display text
+        cat_names = {1: "Person", 2: "Vehicle"}
 
         for i, (box, obj_id) in enumerate(zip(boxes, final_ids)):
             x, y, w, h = [int(v) for v in box]
             orig_id = original_ids[i]
+            cat_id = categories[i]
             
-            # Use normal distinct color by FINAL ID
-            color = self.colors[obj_id % 1000]
+            # --- CATEGORY-AWARE COLOR LOGIC ---
+            # Strategy: Use different starting offsets in the color palette 
+            # to ensure People and Vehicles look distinctly different.
+            if cat_id == 1: # Person
+                color = self.colors[(obj_id + 100) % 1000] 
+            else: # Vehicle (Car, etc.)
+                color = self.colors[(obj_id + 600) % 1000]
 
             # 1. Main Box
             cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
 
             # 2. Text Logic
+            cat_prefix = cat_names.get(cat_id, "OBJ")
             if obj_id != orig_id:
-                # Revival Case: Compact Label "ID 5 > 50"
-                label = f"ID {obj_id} > {orig_id}"
+                # Revival Case: Compact Label "Person ID 5 > 50"
+                label = f"{cat_prefix} {obj_id} > {orig_id}"
             else:
                 # Normal Case
-                label = f"ID {obj_id}"
+                label = f"{cat_prefix} {obj_id}"
             
             # 3. Draw Label
-            (tw, th), _ = cv2.getTextSize(label, self.font, 0.6, 2)
+            (tw, th), _ = cv2.getTextSize(label, self.font, 0.5, 2) # Slightly smaller font for density
             
             # Clamp label position so it stays on screen
             lbl_y = y - 10
-            # If box is too high, push label inside or below
             if lbl_y < 20: 
                 lbl_y = y + 25
 
-            # Background Rectangle (Same as box color)
+            # Background Rectangle (Solid color based on class)
             cv2.rectangle(frame, (x, lbl_y - th - 5), (x + tw + 10, lbl_y + 5), color, -1)
             
-            # Text (White)
-            cv2.putText(frame, label, (x + 5, lbl_y), self.font, 0.6, self.c_white, 2)
+            # Text (White for better contrast on solid background)
+            cv2.putText(frame, label, (x + 5, lbl_y), self.font, 0.5, self.c_white, 2)
 
         return frame

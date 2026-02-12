@@ -41,9 +41,16 @@ class MOTIP(nn.Module):
                     return self.detr(samples=frames)
             case "trajectory_modeling":
                 seq_info = kwargs["seq_info"]
+                # trajectory_modeling creates the history features; we ensure 
+                # the associated class labels are preserved in the seq_info.
                 return self.trajectory_modeling(seq_info)
             case "id_decoder":
                 seq_info = kwargs["seq_info"]
+                
+                # Check for required labels for Multi-Class Gating
+                assert "trajectory_class_labels" in seq_info, "Multi-class MOTIP requires trajectory_class_labels in seq_info"
+                assert "unknown_class_labels" in seq_info, "Multi-class MOTIP requires unknown_class_labels in seq_info"
+                
                 use_decoder_checkpoint = kwargs["use_decoder_checkpoint"] if "use_decoder_checkpoint" in kwargs else False
                 return self.id_decoder(seq_info, use_decoder_checkpoint=use_decoder_checkpoint)
             case _:

@@ -272,7 +272,8 @@ def main():
             res = tracker.get_track_results()
             valid_boxes = res['bbox'].cpu().float().numpy() # [N, 4]
             valid_ids = res['id'].tolist()                  # [N]
-            
+            valid_cats = res['category'].cpu().tolist()     # Extract categories
+
             active_embeds = res.get('embeddings', None)
 
             # --- C. MEMORY UPDATE ---
@@ -289,7 +290,7 @@ def main():
             annotator.update_fps(loop_time)
             
             # 2. Draw Tracks (In-Place)
-            annotator.draw_tracks(frame, valid_boxes, final_ids, valid_ids)
+            annotator.draw_tracks(frame, valid_boxes, final_ids, valid_ids,categories=valid_cats)
             
             # 3. Draw Dashboard 
             # Calculate ACTIVE revivals for this specific frame only

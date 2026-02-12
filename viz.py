@@ -202,7 +202,7 @@ def load_mot_gt(gt_path):
             
             if frame not in gt_dict:
                 gt_dict[frame] = []
-            gt_dict[frame].append({'bbox': [x1, y1, x2, y2], 'id': obj_id})
+            gt_dict[frame].append({'bbox': [x1, y1, x2, y2], 'id': obj_id, 'category': cls})
     return gt_dict
 
 # -------------------------------------------------------------------------
@@ -340,13 +340,22 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args, metric
         pred_scores = res.get('scores', torch.ones(len(pred_ids))).cpu().tolist()
         
         pred_boxes = convert_tlwh_to_xyxy(raw_pred_boxes)
-        
+        pred_cats = res['category'].cpu().tolist()
+
         current_gt = gt_data.get(frame_idx, [])
         gt_boxes = [g['bbox'] for g in current_gt]
         gt_ids_frame = [g['id'] for g in current_gt]
-        
+        gt_cats_frame = [g['category'] for g in current_gt]
+
         # Match Predictions to GT
         iou_matrix = compute_iou_matrix(pred_boxes, gt_boxes)
+        
+        # If classes don't match, set IoU to 0 so they can't match
+        for i in range(len(pred_cats)):
+            for j in range(len(gt_cats_frame)):
+                if pred_cats[i] != gt_cats_frame[j]:
+                    iou_matrix[i, j] = 0
+
         row_ind, col_ind = linear_sum_assignment(1 - iou_matrix)
         
         matched_gt_indices = set()

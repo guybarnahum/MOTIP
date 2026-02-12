@@ -77,6 +77,10 @@ class RuntimeTracker:
         self.trajectory_id_labels = torch.zeros(
             (0, 0), dtype=torch.int64, device=distributed_device(),
         )
+        # Multi-class support:
+        self.trajectory_category_labels = torch.zeros(
+            (0, 0), dtype=torch.int64, device=distributed_device(),
+        )
         self.trajectory_times = torch.zeros(
             (0, 0), dtype=dtype, device=distributed_device(),
         )
@@ -99,7 +103,7 @@ class RuntimeTracker:
         if self.only_detr:
             id_pred_labels = self.num_id_vocabulary * torch.ones(boxes.shape[0], dtype=torch.int64, device=boxes.device)
         else:
-            id_pred_labels = self._get_id_pred_labels(boxes=boxes, output_embeds=output_embeds)
+            id_pred_labels = self._get_id_pred_labels(boxes=boxes, output_embeds=output_embeds, categories=categories)
         # Filter out illegal newborn detections:
         keep_idxs = (id_pred_labels != self.num_id_vocabulary) | (scores > self.newborn_thresh)
         scores = scores[keep_idxs]
@@ -157,7 +161,7 @@ class RuntimeTracker:
             self.id_queue.add(id_labels[_].item())
 
         # Update trajectory infos:
-        self._update_trajectory_infos(boxes=boxes, output_embeds=output_embeds, id_labels=id_labels)
+        self._update_trajectory_infos(boxes=boxes, output_embeds=output_embeds, id_labels=id_labels, categories=categories)
 
         # Filter out inactive tracks:
         self._filter_out_inactive_tracks()
@@ -183,7 +187,7 @@ class RuntimeTracker:
         categories = categories[activate_indices]
         return scores, categories, boxes, output_embeds
 
-    def _get_id_pred_labels(self, boxes: torch.Tensor, output_embeds: torch.Tensor):
+    def _get_id_pred_labels(self, boxes: torch.Tensor, output_embeds: torch.Tensor, categories: torch.Tensor):
         if self.trajectory_features.shape[0] == 0:
             return self.num_id_vocabulary * torch.ones(boxes.shape[0], dtype=torch.int64, device=boxes.device)
         else:
@@ -199,10 +203,12 @@ class RuntimeTracker:
                 "trajectory_features": self.trajectory_features[None, None, ...],
                 "trajectory_boxes": self.trajectory_boxes[None, None, ...],
                 "trajectory_id_labels": self.trajectory_id_labels[None, None, ...],
+                "trajectory_class_labels": self.trajectory_category_labels[None, None, ...],
                 "trajectory_times": self.trajectory_times[None, None, ...],
                 "trajectory_masks": self.trajectory_masks[None, None, ...],
                 "unknown_features": current_features[None, None, ...],
                 "unknown_boxes": current_boxes[None, None, ...],
+                "unknown_class_labels": categories[None, None, ...],
                 "unknown_masks": current_masks[None, None, ...],
                 "unknown_times": current_times[None, None, ...],
             }
@@ -250,6 +256,7 @@ class RuntimeTracker:
             self.trajectory_features = self.trajectory_features[:, ~trajectory_remove_idxs]
             self.trajectory_boxes = self.trajectory_boxes[:, ~trajectory_remove_idxs]
             self.trajectory_id_labels = self.trajectory_id_labels[:, ~trajectory_remove_idxs]
+            self.trajectory_category_labels = self.trajectory_category_labels[:, ~trajectory_remove_idxs]
             self.trajectory_times = self.trajectory_times[:, ~trajectory_remove_idxs]
             self.trajectory_masks = self.trajectory_masks[:, ~trajectory_remove_idxs]
             # 4. assign id labels to newborn instances:
@@ -261,11 +268,12 @@ class RuntimeTracker:
 
             return pred_id_labels
 
-    def _update_trajectory_infos(self, boxes: torch.Tensor, output_embeds: torch.Tensor, id_labels: torch.Tensor):
+    def _update_trajectory_infos(self, boxes: torch.Tensor, output_embeds: torch.Tensor, id_labels: torch.Tensor, categories: torch.Tensor):
         # 1. cut trajectory infos:
         self.trajectory_features = self.trajectory_features[-self.miss_tolerance + 2:, ...]
         self.trajectory_boxes = self.trajectory_boxes[-self.miss_tolerance + 2:, ...]
         self.trajectory_id_labels = self.trajectory_id_labels[-self.miss_tolerance + 2:, ...]
+        self.trajectory_category_labels = self.trajectory_category_labels[-self.miss_tolerance + 2:, ...]
         self.trajectory_times = self.trajectory_times[-self.miss_tolerance + 2:, ...]
         self.trajectory_masks = self.trajectory_masks[-self.miss_tolerance + 2:, ...]
         # 2. find out all new instances:
@@ -274,10 +282,19 @@ class RuntimeTracker:
         newborn_id_labels = _id_labels - already_id_labels
         # 3. add newborn instances to trajectory infos:
         if len(newborn_id_labels) > 0:
-            newborn_id_labels = torch.tensor(list(newborn_id_labels), dtype=torch.int64, device=distributed_device())
+            newborn_id_labels_list = list(newborn_id_labels)
+            newborn_id_labels_tensor = torch.tensor(newborn_id_labels_list, dtype=torch.int64, device=distributed_device())
             _T = self.trajectory_id_labels.shape[0]
-            _N = len(newborn_id_labels)
-            _id_labels = einops.repeat(newborn_id_labels, 'n -> t n', t=_T)
+            _N = len(newborn_id_labels_list)
+            _id_labels = einops.repeat(newborn_id_labels_tensor, 'n -> t n', t=_T)
+            
+            # Map newborns to categories:
+            newborn_cat_list = []
+            for nid in newborn_id_labels_list:
+                idx = (id_labels == nid).nonzero(as_tuple=True)[0][0]
+                newborn_cat_list.append(categories[idx].item())
+            _categories = einops.repeat(torch.tensor(newborn_cat_list, dtype=torch.int64, device=distributed_device()), 'n -> t n', t=_T)
+            
             _boxes = torch.zeros((_T, _N, 4), dtype=self.dtype, device=distributed_device())
             _times = einops.repeat(
                 torch.arange(_T, dtype=torch.int64, device=distributed_device()), 't -> t n', n=_N,
@@ -288,6 +305,7 @@ class RuntimeTracker:
             _masks = torch.ones((_T, _N), dtype=torch.bool, device=distributed_device())
             # 3.1. padding to trajectory infos:
             self.trajectory_id_labels = torch.cat([self.trajectory_id_labels, _id_labels], dim=1)
+            self.trajectory_category_labels = torch.cat([self.trajectory_category_labels, _categories], dim=1)
             self.trajectory_boxes = torch.cat([self.trajectory_boxes, _boxes], dim=1)
             self.trajectory_times = torch.cat([self.trajectory_times, _times], dim=1)
             self.trajectory_features = torch.cat([self.trajectory_features, _features], dim=1)
@@ -297,6 +315,7 @@ class RuntimeTracker:
         current_id_labels = self.trajectory_id_labels[0] if self.trajectory_id_labels.shape[0] > 0 else id_labels
         current_features = torch.zeros((_N, 256), dtype=self.dtype, device=distributed_device())
         current_boxes = torch.zeros((_N, 4), dtype=self.dtype, device=distributed_device())
+        current_categories = self.trajectory_category_labels[0] if self.trajectory_category_labels.shape[0] > 0 else categories
         current_times = self.trajectory_id_labels.shape[0] * torch.ones((_N,), dtype=torch.int64, device=distributed_device())
         current_masks = torch.ones((_N,), dtype=torch.bool, device=distributed_device())
         # 4.1. find out the same id labels (matching):
@@ -307,11 +326,13 @@ class RuntimeTracker:
         current_id_labels[current_idxs] = id_labels[idxs]
         current_features[current_idxs] = output_embeds[idxs]
         current_boxes[current_idxs] = boxes[idxs]
+        current_categories[current_idxs] = categories[idxs]
         current_masks[current_idxs] = False
         # 4.3. cat to trajectory infos:
         self.trajectory_features = torch.cat([self.trajectory_features, current_features[None, ...]], dim=0).contiguous()
         self.trajectory_boxes = torch.cat([self.trajectory_boxes, current_boxes[None, ...]], dim=0).contiguous()
         self.trajectory_id_labels = torch.cat([self.trajectory_id_labels, current_id_labels[None, ...]], dim=0).contiguous()
+        self.trajectory_category_labels = torch.cat([self.trajectory_category_labels, current_categories[None, ...]], dim=0).contiguous()
         self.trajectory_times = torch.cat([self.trajectory_times, current_times[None, ...]], dim=0).contiguous()
         self.trajectory_masks = torch.cat([self.trajectory_masks, current_masks[None, ...]], dim=0).contiguous()
         # 4.4. a hack implementation to fix "times":
@@ -326,6 +347,7 @@ class RuntimeTracker:
         self.trajectory_features = self.trajectory_features[:, is_active]
         self.trajectory_boxes = self.trajectory_boxes[:, is_active]
         self.trajectory_id_labels = self.trajectory_id_labels[:, is_active]
+        self.trajectory_category_labels = self.trajectory_category_labels[:, is_active]
         self.trajectory_times = self.trajectory_times[:, is_active]
         self.trajectory_masks = self.trajectory_masks[:, is_active]
         return

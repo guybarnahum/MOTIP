@@ -74,14 +74,38 @@ class DanceTrack(OneDataset):
         for sequence_name in sequence_names:
             sequence_dir = self._get_sequence_dir(self.data_dir, self.split, sequence_name)
             gt_file_path = os.path.join(sequence_dir, "gt", "gt.txt")
+            
+            # --- MULTI-CLASS ID RE-INDEXING ---
+            # Map raw IDs to vocabulary ranges: Person [0, 499], Vehicle [500, 999]
+            id_map = {} 
+            next_person_idx = 0
+            next_vehicle_idx = 500
+            # ----------------------------------
+
             with open(gt_file_path, "r") as gt_file:
                 for line in gt_file:
                     line = line.strip().split(",")
-                    frame_id, obj_id, x, y, w, h, _, _, _ = line
-                    frame_id, obj_id = map(int, [frame_id, obj_id])
+                    # frame, id, x, y, w, h, conf, class, visibility
+                    frame_id, raw_obj_id, x, y, w, h, _, class_id, _ = line
+                    
+                    frame_id, raw_obj_id = map(int, [frame_id, raw_obj_id])
                     x, y, w, h = map(float, [x, y, w, h])
+                    
+                    # CHANGE: Use the actual class_id from the file instead of hardcoded 0
+                    # Standard MOT format usually uses 1 for pedestrian, 2-7+ for vehicles
+                        if category == 1: # Person
+                            id_map[(raw_obj_id, category)] = next_person_idx
+                            next_person_idx = (next_person_idx + 1) % 500
+                        else: # Vehicle (Class 2)
+                            id_map[(raw_obj_id, category)] = next_vehicle_idx
+                            # Ensure vehicle index stays within 500-999
+                            next_vehicle_idx = 500 + ((next_vehicle_idx - 500 + 1) % 500)
+                    
+                    obj_id = id_map[(raw_obj_id, category)]
+                    # ---------------------------------------
+                    
                     bbox = [x, y, w, h]
-                    category, visibility = 0, 1.0
+                    visibility = 1.0
                     ann_index = frame_id - 1    # 0-indexed for annotations
                     # Organized into the annotations:
                     annotations[sequence_name][ann_index] = append_annotation(

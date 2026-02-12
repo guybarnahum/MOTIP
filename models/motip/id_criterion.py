@@ -22,21 +22,31 @@ class IDCriterion(nn.Module):
             self.ce_loss = nn.CrossEntropyLoss(reduction="none")
         return
 
-    def forward(self, id_logits, id_labels, id_masks):
-        # _B, _G, _T, _N = id_logits.shape
+    def forward(self, id_logits, id_labels, id_masks, id_categories=None):
+        # id_logits: [B, G, T, N, C]
+        # id_labels: [B, G, T, N]
+        # id_masks:  [B, G, T, N]
+        # id_categories: [B, G, T, N] (New for multi-class support)
+
         # Remove the first T for supervision:
         id_logits = id_logits[:, :, 1:, :, :]
         id_labels = id_labels[:, :, 1:, :]
         id_masks = id_masks[:, :, 1:, :]
+        
+        if id_categories is not None:
+            id_categories = id_categories[:, :, 1:, :]
         pass
 
         # Flatten:
         id_logits_flatten = einops.rearrange(id_logits, "b g t n c -> (b g t n) c")
         id_labels_flatten = einops.rearrange(id_labels, "b g t n -> (b g t n)")
         id_masks_flatten = einops.rearrange(id_masks, "b g t n -> (b g t n)")
+        
         # Filter out the invalid id labels:
-        id_logits_flatten = id_logits_flatten[~id_masks_flatten]
-        id_labels_flatten = id_labels_flatten[~id_masks_flatten]
+        valid_indices = ~id_masks_flatten
+        id_logits_flatten = id_logits_flatten[valid_indices]
+        id_labels_flatten = id_labels_flatten[valid_indices]
+
         # Calculate the loss:
         if self.use_focal_loss:
             id_labels_flatten_one_hot = labels_to_one_hot(id_labels_flatten, class_num=id_logits_flatten.shape[-1])
@@ -44,6 +54,7 @@ class IDCriterion(nn.Module):
             loss = sigmoid_focal_loss(inputs=id_logits_flatten, targets=id_labels_flatten_one_hot).sum()
         else:
             loss = self.ce_loss(id_logits_flatten, id_labels_flatten).sum()
+        
         num_ids = torch.as_tensor([len(id_logits_flatten)], dtype=torch.float, device=id_logits.device)
 
         if is_distributed():
