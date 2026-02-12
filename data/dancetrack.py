@@ -130,12 +130,26 @@ class DanceTrack(OneDataset):
             annotations[sequence_name] = []
             for i in range(self.sequence_infos[sequence_name]["length"]):
                 annotations[sequence_name].append({
+                    # --- Raw Detection Data ---
                     "id": torch.zeros((0, ), dtype=torch.int64),
                     "category": torch.zeros((0, ), dtype=torch.int64),
                     "bbox": torch.zeros((0, 4), dtype=torch.float32),
                     "visibility": torch.zeros((0, ), dtype=torch.float32),
-                    "trajectory_class_labels": torch.zeros((0, 1, 1), dtype=torch.int64), 
-                    "trajectory_is_legal": torch.zeros((0, ), dtype=torch.bool),
+                    
+                    # --- Trajectory Metadata (Used by prepare_for_motip) ---
+                    # Note: We use (0, 1, 0) or (1, 1, 0) so that 'collate_fn' 
+                    # can concatenate along the last dimension (N).
+                    "trajectory_id_labels": torch.zeros((1, 1, 0), dtype=torch.int64),
+                    "trajectory_id_masks": torch.zeros((1, 1, 0), dtype=torch.bool),
+                    "trajectory_ann_idxs": torch.zeros((1, 1, 0), dtype=torch.int64),
+                    "trajectory_times": torch.zeros((1, 1, 0), dtype=torch.int64),
+                    "trajectory_class_labels": torch.zeros((1, 1, 0), dtype=torch.int64),
+                    
+                    # --- Unknowns Metadata ---
+                    "unknown_id_labels": torch.zeros((1, 1, 0), dtype=torch.int64),
+                    "unknown_id_masks": torch.zeros((1, 1, 0), dtype=torch.bool),
+                    "unknown_ann_idxs": torch.zeros((1, 1, 0), dtype=torch.int64),
+                    "unknown_times": torch.zeros((1, 1, 0), dtype=torch.int64),
+                    "unknown_class_labels": torch.zeros((1, 1, 0), dtype=torch.int64),
                 })
         return annotations
-
