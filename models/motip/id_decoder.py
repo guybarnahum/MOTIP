@@ -111,20 +111,20 @@ class IDDecoder(nn.Module):
         _curr_B, _curr_G, _curr_T, _curr_N, _ = unknown_features.shape
 
         # --- ID RANGE ASSET CHECK ---
-        # Prevent "Device-side assert triggered" by catching OOB IDs before embedding lookup
+        # Allow ID up to num_id_vocabulary (the Newborn ID index).
         if self.training:
             valid_traj_mask = (trajectory_id_labels != -1)
             if valid_traj_mask.any():
                 max_traj_id = trajectory_id_labels[valid_traj_mask].max().item()
                 if max_traj_id > self.num_id_vocabulary:
-                    raise RuntimeError(f"[ID_DECODER] Trajectory ID {max_traj_id} > vocabulary {self.num_id_vocabulary}")
+                    raise RuntimeError(f"[ID_DECODER] Trajectory ID {max_traj_id} > {self.num_id_vocabulary}")
 
             if unknown_id_labels is not None:
                 valid_unk_mask = (unknown_id_labels != -1)
                 if valid_unk_mask.any():
                     max_unk_id = unknown_id_labels[valid_unk_mask].max().item()
                     if max_unk_id > self.num_id_vocabulary:
-                        raise RuntimeError(f"[ID_DECODER] Unknown ID {max_unk_id} > vocabulary {self.num_id_vocabulary}")
+                        raise RuntimeError(f"[ID_DECODER] Unknown ID {max_unk_id} > {self.num_id_vocabulary}")
         # ----------------------------
 
         trajectory_id_embeds = self.id_label_to_embed(id_labels=trajectory_id_labels)
@@ -150,7 +150,7 @@ class IDDecoder(nn.Module):
         cross_attn_mask = cross_attn_mask | class_mismatch_mask
         # --------------------------------
 
-        cross_attn_mask = einops.repeat(cross_attn_mask, "bg tn1 tn2 -> (bg n_heads) tn1 tn2", n_heads=self_heads).contiguous() if hasattr(self, 'n_heads') else einops.repeat(cross_attn_mask, "bg tn1 tn2 -> (bg n_heads) tn1 tn2", n_heads=(self.feature_dim + self.id_dim) // self.head_dim).contiguous()
+        cross_attn_mask = einops.repeat(cross_attn_mask, "bg tn1 tn2 -> (bg n_heads) tn1 tn2", n_heads=self.n_heads).contiguous()
         
         # Prepare for rel PE:
         self.rel_pos_map = self.rel_pos_map.to(trajectory_features.device)
@@ -289,7 +289,7 @@ class IDDecoder(nn.Module):
         shuffle_index = torch.randperm(self.num_id_vocabulary, device=self.word_to_embed.weight.device)
         shuffle_index = torch.cat([shuffle_index, torch.tensor([self.num_id_vocabulary], device=self.word_to_embed.weight.device)])
         self.word_to_embed.weight.data = self.word_to_embed.weight.data[:, shuffle_index]
-        self.embed_to_word_layers[0].weight.data = self.embed_to_word_layers[0].weight.data[shuffle_index, :] # Simplified for shared head
+        self.embed_to_word.weight.data = self.embed_to_word.weight.data[shuffle_index, :]
         pass
 
     @property
