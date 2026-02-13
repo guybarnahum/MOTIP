@@ -73,6 +73,13 @@ class HungarianMatcher(nn.Module):
             tgt_ids = torch.cat([v["labels"] for v in targets])
             tgt_bbox = torch.cat([v["boxes"] for v in targets])
 
+            # --- WATCHDOG: INDEXING GUARD ---
+            if tgt_ids.numel() > 0:
+                if tgt_ids.max() >= out_prob.shape[-1]:
+                    print(f"❌ [MATCHER ERROR] Ground Truth Label {tgt_ids.max().item()} "
+                          f"exceeds model output classes {out_prob.shape[-1]}. "
+                          "Check if category mapping in dancetrack.py is 0-indexed!")
+
             # Compute the classification cost.
             alpha = 0.25
             gamma = 2.0
@@ -101,6 +108,23 @@ class HungarianMatcher(nn.Module):
 
             sizes = [len(v["boxes"]) for v in targets]
             indices = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))]
+
+            # --- WATCHDOG: MATCHING FAILURE DETECTION ---
+            # Inspect the quality of the assignment to detect categorical misalignment
+            for b_idx, (q_idx, t_idx) in enumerate(indices):
+                num_gt = sizes[b_idx]
+                if num_gt > 0:
+                    # Isolate the cost matrix for the current batch element
+                    batch_cost_matrix = C[b_idx].split(sizes, -1)[b_idx]
+                    matched_costs = batch_cost_matrix[q_idx, t_idx]
+                    
+                    # If any match has a cost > 500, the blocker was triggered
+                    if (matched_costs > 500).any():
+                        bad_matches = (matched_costs > 500).sum().item()
+                        print(f"⚠️ [MATCHER WATCHDOG] Batch {b_idx}: {bad_matches}/{num_gt} objects "
+                              "failed category-pure matching. Check for class label shifts!")
+            # --------------------------------------------
+
             return [(torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64)) for i, j in indices]
 
 

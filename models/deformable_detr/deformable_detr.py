@@ -116,7 +116,7 @@ class DeformableDETR(nn.Module):
                 nn.init.constant_(box_embed.layers[-1].bias.data[2:], 0.0)
 
     def forward(self, samples: NestedTensor):
-        """ The forward expects a NestedTensor, which consists of:
+        """ The forward expects a NestedTensor, which consists of:
                - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
                - samples.mask: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels
 
@@ -461,7 +461,12 @@ class PostProcess(nn.Module):
         topk_values, topk_indexes = torch.topk(prob.view(out_logits.shape[0], -1), 100, dim=1)
         scores = topk_values
         topk_boxes = topk_indexes // out_logits.shape[2]
+        
+        # --- MULTI-CLASS SHIFT: 0-indexed training to 1-indexed evaluation ---
         labels = topk_indexes % out_logits.shape[2]
+        labels = labels + 1  # (Person: 0->1, Vehicle: 1->2)
+        # ---------------------------------------------------------------------
+
         boxes = box_ops.box_cxcywh_to_xyxy(out_bbox)
         boxes = torch.gather(boxes, 1, topk_boxes.unsqueeze(-1).repeat(1,1,4))
 
@@ -540,4 +545,3 @@ def build(args):
             postprocessors["panoptic"] = PostProcessPanoptic(is_thing_map, threshold=0.85)
 
     return model, criterion, postprocessors
-

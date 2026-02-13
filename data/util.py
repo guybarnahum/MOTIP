@@ -137,3 +137,147 @@ def collate_fn(batch):
         "annotations": annotations,
         "metas": metas,
     }
+
+def verify_batch_integrity(batch, num_classes=None, id_vocabulary=None, step=None):
+    """
+    Runtime check to ensure Multi-Class labels, IDs, and BBoxes are within expected ranges.
+    """
+    all_categories = []
+    all_ids = []
+    all_bboxes = []
+    
+    for b_idx, clip in enumerate(batch["annotations"]):
+        for t_idx, ann in enumerate(clip):
+            if "category" in ann and ann["category"].numel() > 0:
+                all_categories.append(ann["category"])
+                all_ids.append(ann["id"])
+                all_bboxes.append(ann["bbox"])
+
+    if not all_categories:
+        return  # Skip empty batches
+
+    all_categories = torch.cat(all_categories)
+    all_ids = torch.cat(all_ids)
+    all_bboxes = torch.cat(all_bboxes)
+
+    # --- NAN / INF SANITY CHECK ---
+    # Catch non-finite values across labels, ids, and boxes
+    if not torch.isfinite(all_categories.float()).all() or \
+       not torch.isfinite(all_ids.float()).all() or \
+       not torch.isfinite(all_bboxes).all():
+        raise ValueError(f"❌ [DIAGNOSTIC] Step {step}: NaN or Inf detected in batch data!")
+
+    # --- CATEGORY CHECK ---
+    max_cat = all_categories.max().item()
+    min_cat = all_categories.min().item()
+    
+    if num_classes is not None and num_classes > 0:
+        if max_cat >= num_classes:
+            raise ValueError(
+                f"❌ [DIAGNOSTIC] Step {step}: Category Index Error: Found category {max_cat}, "
+                f"but num_classes is {num_classes}. (Check 0-indexing!)"
+            )
+    
+    if min_cat < 0:
+        raise ValueError(f"❌ [DIAGNOSTIC] Step {step}: Negative Category found: {min_cat}")
+
+    # --- ID RANGE CHECK ---
+    max_id = all_ids.max().item()
+    if id_vocabulary is not None and id_vocabulary > 0:
+        if max_id >= id_vocabulary:
+            raise ValueError(
+                f"❌ [DIAGNOSTIC] Step {step}: ID Overflow: Found ID {max_id}, but vocabulary "
+                f"is {id_vocabulary}. This will cause a CUDA crash!"
+            )
+    
+    # --- BOUNDING BOX "GIANT BOX" CHECK ---
+    # DETR models expect normalized coordinates in [0, 1].
+    # We allow a small margin (-0.5 to 1.5) for augmentation/clipping, but anything larger 
+    # indicates a coordinate system mismatch (e.g., raw pixels).
+    box_min = all_bboxes.min().item()
+    box_max = all_bboxes.max().item()
+    if box_max > 2.0 or box_min < -1.0:
+        raise ValueError(
+            f"❌ [DIAGNOSTIC] Step {step}: Giant Box Detected! BBox values range from {box_min:.2f} to {box_max:.2f}. "
+            f"DETR requires normalized [0, 1] coordinates. Ensure you divide by width/height in dancetrack.py!"
+        )
+
+    # Check for zero/negative width or height which causes GIoU to fail (NaN)
+    # Assumes [cx, cy, w, h] format
+    if (all_bboxes[:, 2:] <= 0).any():
+        raise ValueError(f"❌ [DIAGNOSTIC] Step {step}: Found BBox with zero or negative width/height!")
+
+    # --- MULTI-CLASS RANGE CHECK (Person 0-499, Vehicle 500-999) ---
+    person_ids = all_ids[all_categories == 0]
+    vehicle_ids = all_ids[all_categories == 1]
+
+    if person_ids.numel() > 0:
+        p_max = person_ids.max().item()
+        if p_max >= 500:
+            print(f"⚠️ [WARNING] Step {step}: Person Category (0) has IDs in Vehicle range: {p_max}")
+            
+    if vehicle_ids.numel() > 0:
+        v_min = vehicle_ids.min().item()
+        if v_min < 500:
+            print(f"⚠️ [WARNING] Step {step}: Vehicle Category (1) has IDs in Person range: {v_min}")
+
+    # --- BATCH COMPOSITION LOGGING ---
+    should_log = (step is None) or (step % 50 == 0)
+    if should_log:
+        p_count = (all_categories == 0).sum().item()
+        v_count = (all_categories == 1).sum().item()
+        msg = f"🔍 [DEBUG Batch {step if step is not None else ''}] People={p_count} | Vehicles={v_count}"
+        if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
+            print(msg)
+        elif not torch.distributed.is_initialized():
+            print(msg)
+
+            
+_CUMULATIVE_COUNTS = {0: 0, 1: 0} # Persistent storage for the epoch
+   
+def check_categorical_balance(batch, step, log_interval=100):
+    """
+    Logs the distribution of classes in the current batch and cumulatively.
+    Category 0: Person, Category 1: Vehicle
+    """
+    global _CUMULATIVE_COUNTS
+
+    if step == 0:
+        _CUMULATIVE_COUNTS = {0: 0, 1: 0}
+
+    # 1. Extract categories from batch
+    batch_categories = []
+    for clip in batch["annotations"]:
+        for ann in clip:
+            if ann["category"].numel() > 0:
+                batch_categories.append(ann["category"])
+    
+    if not batch_categories:
+        return
+
+    batch_categories = torch.cat(batch_categories)
+    
+    # 2. Update cumulative counts
+    p_batch = (batch_categories == 0).sum().item()
+    v_batch = (batch_categories == 1).sum().item()
+    
+    _CUMULATIVE_COUNTS[0] += p_batch
+    _CUMULATIVE_COUNTS[1] += v_batch
+
+    # 3. Periodically log the balance
+    if step % log_interval == 0:
+        total = _CUMULATIVE_COUNTS[0] + _CUMULATIVE_COUNTS[1]
+        p_ratio = (_CUMULATIVE_COUNTS[0] / total * 100) if total > 0 else 0
+        v_ratio = (_CUMULATIVE_COUNTS[1] / total * 100) if total > 0 else 0
+        
+        msg = (f"📊 [CLASS BALANCE] Step {step} | "
+               f"Total Objects: {total} | "
+               f"People: {p_ratio:.1f}% ({_CUMULATIVE_COUNTS[0]}) | "
+               f"Vehicles: {v_ratio:.1f}% ({_CUMULATIVE_COUNTS[1]})")
+        
+        # Log only on the main process for distributed training
+        if torch.distributed.is_initialized():
+            if torch.distributed.get_rank() == 0:
+                print(msg)
+        else:
+            print(msg)

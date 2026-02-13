@@ -21,7 +21,7 @@ from configs.util import load_super_config, update_config
 from log.logger import Logger
 from data import build_dataset
 from data.naive_sampler import NaiveSampler
-from data.util import collate_fn
+from data.util import collate_fn, verify_batch_integrity, check_categorical_balance
 from log.log import TPS, Metrics
 from models.misc import load_detr_pretrain, save_checkpoint, load_checkpoint
 from models.misc import get_model
@@ -197,6 +197,8 @@ def train_engine(config: dict):
             is_last_epochs=(epoch == config["EPOCHS"] - 1),
             multi_last_checkpoints=config["MULTI_LAST_CHECKPOINTS"],
             memory_efficient=config.get("MEMORY_EFFICIENT",False),
+            num_classes=config.get("NUM_CLASSES",None),
+            id_vocabulary=config.get("NUM_ID_VOCABULARY",None)
         )
 
         # Get learning rate:
@@ -314,6 +316,8 @@ def train_one_epoch(
         is_last_epochs: bool = False,
         multi_last_checkpoints: int = 0,
         memory_efficient: bool = False,
+        num_classes: int = None,
+        id_vocabulary: int = None
 ):
     current_last_checkpoint_idx = 0
 
@@ -337,6 +341,9 @@ def train_one_epoch(
             other_params.append(param)
 
     for step, samples in enumerate(dataloader):
+
+        verify_batch_integrity(samples, num_classes=num_classes, id_vocabulary=id_vocabulary,step=step)
+        check_categorical_balance(samples, step)
 
         try:
             if memory_efficient:

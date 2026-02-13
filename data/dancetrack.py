@@ -91,11 +91,12 @@ class DanceTrack(OneDataset):
                     frame_id, raw_obj_id = map(int, [frame_id, raw_obj_id])
                     x, y, w, h = map(float, [x, y, w, h])
                     
-                    category = int(class_id) 
+                    # Assuming 1=Person, 2=Vehicle in your gt.txt
+                    category = int(class_id) - 1  # Person becomes 0, Vehicle becomes 1
 
                     # --- MAP RAW ID TO VOCABULARY RANGE ---
                     if (raw_obj_id, category) not in id_map:
-                        if category == 1:  # Person
+                        if category == 0:  # Person
                             id_map[(raw_obj_id, category)] = next_person_idx
                             next_person_idx = (next_person_idx + 1) % 500
                         else:  # Vehicle
