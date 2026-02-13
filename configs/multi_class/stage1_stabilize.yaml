@@ -60,7 +60,7 @@ USE_DECODER_CHECKPOINT: True
 
 # Image Resolution Limits (Memory Safety for Stage 1)
 # Stage 1 uses eye-level/dash; 1000px is sufficient for detection.
-AUG_MAX_SIZE: 1000
+AUG_MAX_SIZE: 900
 AUG_RESIZE_SCALES: [480, 512, 544, 576, 608, 640]
 AUG_RANDOM_RESIZE: [400, 500, 600]
 
