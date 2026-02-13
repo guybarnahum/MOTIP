@@ -467,6 +467,18 @@ class TurnIntoTrajectoryAndUnknown:
         ann_idxs = torch.cat([annotation["ann_idxs"] for annotation in annotations], dim=1)
         times = torch.cat([annotation["times"] for annotation in annotations], dim=1)
         _G, _T, _N = id_labels.shape
+
+        # --- MULTI-CLASS SUPPORT: Pre-collect Categories ---
+        # We need to preserve the category for each object across groups
+        category_grid = - torch.ones((_G, _T, _N), dtype=torch.int64)
+        for t in range(_T):
+            raw_cats = annotations[t]["category"]
+            for g in range(_G):
+                _mask = (ann_idxs[g, t] != -1)
+                if _mask.any():
+                    category_grid[g, t, _mask] = raw_cats[ann_idxs[g, t][_mask]]
+        # ----------------------------------------------------
+
         # Del these fields from the annotations:
         for t in range(_T):
             del annotations[t]["id_labels"]
@@ -567,10 +579,22 @@ class TurnIntoTrajectoryAndUnknown:
             annotations[t]["trajectory_id_masks"] = trajectory_id_masks[:, t:t+1, :]
             annotations[t]["trajectory_ann_idxs"] = trajectory_ann_idxs[:, t:t+1, :]
             annotations[t]["trajectory_times"] = trajectory_times[:, t:t+1, :]
-            annotations[t]["unknown_id_labels"] = unknown_id_labels[:, t:t+1, :]
-            annotations[t]["unknown_id_masks"] = unknown_id_masks[:, t:t+1, :]
-            annotations[t]["unknown_ann_idxs"] = unknown_ann_idxs[:, t:t+1, :]
-            annotations[t]["unknown_times"] = unknown_times[:, t:t+1, :]
+            
+            # --- MAP FINAL CATEGORIES TO GRIDS ---
+            # Even if objects switch slots, they keep their category
+            annotations[t]["trajectory_class_labels"] = category_grid[:, t:t+1, :]
+            annotations[t]["unknown_class_labels"] = category_grid[:, t:t+1, :]
+            # -------------------------------------
+
+            unknown_id_labels_slice = unknown_id_labels[:, t:t+1, :]
+            unknown_id_masks_slice = unknown_id_masks[:, t:t+1, :]
+            unknown_ann_idxs_slice = unknown_ann_idxs[:, t:t+1, :]
+            unknown_times_slice = unknown_times[:, t:t+1, :]
+
+            annotations[t]["unknown_id_labels"] = unknown_id_labels_slice
+            annotations[t]["unknown_id_masks"] = unknown_id_masks_slice
+            annotations[t]["unknown_ann_idxs"] = unknown_ann_idxs_slice
+            annotations[t]["unknown_times"] = unknown_times_slice
 
         return images, annotations, metas
 
