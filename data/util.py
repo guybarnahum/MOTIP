@@ -184,10 +184,12 @@ def verify_batch_integrity(batch, num_classes=None, id_vocabulary=None, step=Non
     # --- ID RANGE CHECK ---
     max_id = all_ids.max().item()
     if id_vocabulary is not None and id_vocabulary > 0:
-        if max_id >= id_vocabulary:
+        # MOTIP uses 'id_vocabulary' as the specific index for Newborns.
+        # The embedding matrix size is vocabulary + 1, so max_id can be EQUAL to vocabulary.
+        if max_id > id_vocabulary:
             raise ValueError(
-                f"❌ [DIAGNOSTIC] Step {step}: ID Overflow: Found ID {max_id}, but vocabulary "
-                f"is {id_vocabulary}. This will cause a CUDA crash!"
+                f"❌ [DIAGNOSTIC] Step {step}: ID Overflow: Found ID {max_id}, but "
+                f"vocabulary limit is {id_vocabulary}. (Only IDs > {id_vocabulary} are illegal)"
             )
     
     # --- BOUNDING BOX "GIANT BOX" CHECK ---
@@ -232,7 +234,7 @@ def verify_batch_integrity(batch, num_classes=None, id_vocabulary=None, step=Non
         elif not torch.distributed.is_initialized():
             print(msg)
 
-            
+
 _CUMULATIVE_COUNTS = {0: 0, 1: 0} # Persistent storage for the epoch
    
 def check_categorical_balance(batch, step, log_interval=100):

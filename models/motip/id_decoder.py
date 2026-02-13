@@ -116,15 +116,15 @@ class IDDecoder(nn.Module):
             valid_traj_mask = (trajectory_id_labels != -1)
             if valid_traj_mask.any():
                 max_traj_id = trajectory_id_labels[valid_traj_mask].max().item()
-                if max_traj_id >= self.num_id_vocabulary:
-                    raise RuntimeError(f"[ID_DECODER] Trajectory ID {max_traj_id} >= vocabulary {self.num_id_vocabulary}")
+                if max_traj_id > self.num_id_vocabulary:
+                    raise RuntimeError(f"[ID_DECODER] Trajectory ID {max_traj_id} > vocabulary {self.num_id_vocabulary}")
 
             if unknown_id_labels is not None:
                 valid_unk_mask = (unknown_id_labels != -1)
                 if valid_unk_mask.any():
                     max_unk_id = unknown_id_labels[valid_unk_mask].max().item()
-                    if max_unk_id >= self.num_id_vocabulary:
-                        raise RuntimeError(f"[ID_DECODER] Unknown ID {max_unk_id} >= vocabulary {self.num_id_vocabulary}")
+                    if max_unk_id > self.num_id_vocabulary:
+                        raise RuntimeError(f"[ID_DECODER] Unknown ID {max_unk_id} > vocabulary {self.num_id_vocabulary}")
         # ----------------------------
 
         trajectory_id_embeds = self.id_label_to_embed(id_labels=trajectory_id_labels)
