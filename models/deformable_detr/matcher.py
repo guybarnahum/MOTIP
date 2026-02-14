@@ -111,18 +111,18 @@ class HungarianMatcher(nn.Module):
 
             # --- WATCHDOG: MATCHING FAILURE DETECTION ---
             # Inspect the quality of the assignment to detect categorical misalignment
-            for b_idx, (q_idx, t_idx) in enumerate(indices):
-                num_gt = sizes[b_idx]
-                if num_gt > 0:
-                    # Isolate the cost matrix for the current batch element
-                    batch_cost_matrix = C[b_idx].split(sizes, -1)[b_idx]
-                    matched_costs = batch_cost_matrix[q_idx, t_idx]
-                    
-                    # If any match has a cost > 500, the blocker was triggered
-                    if (matched_costs > 500).any():
-                        bad_matches = (matched_costs > 500).sum().item()
-                        print(f"⚠️ [MATCHER WATCHDOG] Batch {b_idx}: {bad_matches}/{num_gt} objects "
-                              "failed category-pure matching. Check for class label shifts!")
+            # for b_idx, (q_idx, t_idx) in enumerate(indices):
+            #    num_gt = sizes[b_idx]
+            #    if num_gt > 0:
+            #        # Isolate the cost matrix for the current batch element
+            #        batch_cost_matrix = C[b_idx].split(sizes, -1)[b_idx]
+            #        matched_costs = batch_cost_matrix[q_idx, t_idx]
+            #        
+            #        # If any match has a cost > 500, the blocker was triggered
+            #        if (matched_costs > 500).any():
+            #            bad_matches = (matched_costs > 500).sum().item()
+            #            print(f"⚠️ [MATCHER WATCHDOG] Batch {b_idx}: {bad_matches}/{num_gt} objects "
+            #                  "failed category-pure matching. Check for class label shifts!")
             # --------------------------------------------
 
             return [(torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64)) for i, j in indices]
