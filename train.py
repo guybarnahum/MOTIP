@@ -497,8 +497,17 @@ def train_one_epoch(
                 detr_loss = sum(
                     detr_loss_dict[k] * detr_weight_dict[k] for k in detr_loss_dict.keys() if k in detr_weight_dict
                 )
+                
+                # --- STABILITY SHIELD: Total Loss Calculation ---
                 loss = detr_loss + (id_loss if id_loss is not None else 0) * id_criterion.weight
                 
+                # Verify loss is finite before proceeding to backward
+                if not torch.isfinite(loss):
+                    print(f"\n❌ [CRITICAL] Non-finite loss detected at step {step}! "
+                          f"DETR: {detr_loss:.4f}, ID: {id_loss if id_loss is not None else 0:.4f}. skipping batch.")
+                    optimizer.zero_grad()
+                    continue
+
                 # Logging losses:
                 metrics.update(name="loss", value=loss.item())
                 metrics.update(name="detr_loss", value=detr_loss.item())
@@ -526,12 +535,18 @@ def train_one_epoch(
                         detr_grad_norm = other_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_clip_norm)
                     # --- PATCH END ---
 
-                    # Hack implementation to log grad_norm
-                    metrics.update(name="detr_grad_norm", value=detr_grad_norm.item())
-                    metrics.update(name="other_grad_norm", value=other_grad_norm.item())
-                    
-                    optimizer.step()
-                    optimizer.zero_grad()
+                    # --- STABILITY SHIELD: NaN Gradient Gate ---
+                    # If gradients are NaN, skip the step to prevent weight corruption
+                    if torch.isnan(detr_grad_norm) or torch.isnan(other_grad_norm):
+                        print(f"\n⚠️ [WARNING] NaN Gradients detected at step {step}. Skipping weight update to protect model.")
+                        optimizer.zero_grad()
+                    else:
+                        # Hack implementation to log grad_norm
+                        metrics.update(name="detr_grad_norm", value=detr_grad_norm.item())
+                        metrics.update(name="other_grad_norm", value=other_grad_norm.item())
+                        
+                        optimizer.step()
+                        optimizer.zero_grad()
 
             # Logging:
             tps.update(tps=tps.timestamp() - step_timestamp)

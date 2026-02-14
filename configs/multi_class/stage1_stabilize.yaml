@@ -35,7 +35,7 @@ EPOCHS: 10
 LR: 2.0e-5          # Standard transfer learning rate
 LR_DROP: 7          # Drop at 7 gives 3 full epochs of fine-grained optimization
 LR_BACKBONE: 2.0e-6
-LR_WARMUP_EPOCHS: 1
+LR_WARMUP_EPOCHS: 3
 
 # Learning Rate Scaling for Dictionary
 # We want the new ID embeddings (especially for Vehicles) to learn faster
@@ -60,7 +60,7 @@ USE_DECODER_CHECKPOINT: True
 
 # Image Resolution Limits (Memory Safety for Stage 1)
 # Stage 1 uses eye-level/dash; 1000px is sufficient for detection.
-AUG_MAX_SIZE: 900
+AUG_MAX_SIZE: 800
 AUG_RESIZE_SCALES: [480, 512, 544, 576, 608, 640]
 AUG_RANDOM_RESIZE: [400, 500, 600]
 
