@@ -43,7 +43,6 @@ LR_DICTIONARY_SCALE: 1.0
 
 # Sampling Strategy (Foundation Phase)
 # We use 5 frames to establish short-term motion and category consistency.
-# frame_step (in toml) is 2, so intervals [2, 3] cover ~0.5 to 1.0 seconds.
 sampler_lengths: [5]
 sample_intervals: [2, 3]
 
@@ -52,17 +51,26 @@ sample_intervals: [2, 3]
 # ------------------------------------------------------------------------
 BATCH_SIZE: 1
 ACCUMULATE_STEPS: 4       # Effective Batch Size = 4 (1 * 4)
-NUM_WORKERS: 4
+
+# Quality Priority: Reduced workers to 2 to prevent instance hang on g5.2xlarge
+NUM_WORKERS: 2
 
 # Global flags for memory safety on A10G
 MEMORY_EFFICIENT: True
 USE_DECODER_CHECKPOINT: True
 
 # Image Resolution Limits (Memory Safety for Stage 1)
-# Stage 1 uses eye-level/dash; 1000px is sufficient for detection.
-AUG_MAX_SIZE: 800
-AUG_RESIZE_SCALES: [480, 512, 544, 576, 608, 640]
-AUG_RANDOM_RESIZE: [400, 500, 600]
+# Quality Priority: Maintaining POINTS at 4, but limiting MAX_SIZE to 720
+# to prevent the 22,000MB+ spikes that caused the previous crash.
+AUG_MAX_SIZE: 720
+AUG_RANDOM_RESIZE: [256, 384, 448]
+AUG_RESIZE_SCALES: [400, 480, 512, 544, 576, 608]
+
+# Optimization for Deformable DETR Sampling
+# Quality Priority: Kept at 4 to maintain detection accuracy.
+# VRAM is instead saved through smaller AUG_MAX_SIZE.
+DETR_DEC_N_POINTS: 4
+DETR_ENC_N_POINTS: 4
 
 # Output Directories (Handled automatically by train-start.sh)
 OUTPUT_DIR: null
