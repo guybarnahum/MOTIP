@@ -29,13 +29,13 @@ RESUME_OPTIMIZER: False
 RESUME_SCHEDULER: False
 
 # ------------------------------------------------------------------------
-# Training Strategy
+# Training Strategy (6-Epoch Stabilization Optimized)
 # ------------------------------------------------------------------------
-EPOCHS: 10
-LR: 2.0e-5          # Standard transfer learning rate
-LR_DROP: 7          # Drop at 7 gives 3 full epochs of fine-grained optimization
+EPOCHS: 6           # Increased to 6 for a balanced stabilization cycle
+LR: 2.0e-5          
+LR_DROP: 5          # Drop at 5 gives a final epoch of fine-tuning at 1/10th LR
 LR_BACKBONE: 2.0e-6
-LR_WARMUP_EPOCHS: 3
+LR_WARMUP_EPOCHS: 1 # Shortened warmup for quicker convergence
 
 # Learning Rate Scaling for Dictionary
 # We want the new ID embeddings (especially for Vehicles) to learn faster
@@ -50,7 +50,7 @@ sample_intervals: [2, 3]
 # Hardware Safety (A10G / 24GB VRAM)
 # ------------------------------------------------------------------------
 BATCH_SIZE: 1
-ACCUMULATE_STEPS: 4       # Effective Batch Size = 4 (1 * 4)
+ACCUMULATE_STEPS: 4       
 
 # Quality Priority: Reduced workers to 2 to prevent instance hang on g5.2xlarge
 NUM_WORKERS: 2
@@ -68,7 +68,6 @@ AUG_RESIZE_SCALES: [400, 480, 512, 544, 576, 608]
 
 # Optimization for Deformable DETR Sampling
 # Quality Priority: Kept at 4 to maintain detection accuracy.
-# VRAM is instead saved through smaller AUG_MAX_SIZE.
 DETR_DEC_N_POINTS: 4
 DETR_ENC_N_POINTS: 4
 
