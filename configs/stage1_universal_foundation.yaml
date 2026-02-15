@@ -54,6 +54,9 @@ AUG_MAX_SIZE: 1000
 AUG_RESIZE_SCALES: [480, 512, 544, 576, 608, 640]
 AUG_RANDOM_RESIZE: [400, 500, 600]
 
+AUG_RANDOM_CROP_MIN: 256
+AUG_RANDOM_CROP_MAX: 512
+
 # Output Directories (Handled automatically by script timestamping)
 OUTPUT_DIR: null
 OUTPUTS_DIR: null

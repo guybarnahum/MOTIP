@@ -232,8 +232,21 @@ class MultiRandomCrop:
     def __call__(self, images, annotations, metas):
         # Calculate the crop box:
         curr_h, curr_w = get_image_hw(images)
-        crop_h = random.randint(self.min_size, min(self.max_size, curr_h))
-        crop_w = random.randint(self.min_size, min(self.max_size, curr_w))
+        
+        # 🛡️ SAFETY GATE: If the image is already smaller than our minimum crop size, 
+        # we skip the cropping transform entirely.
+        if curr_h < self.min_size or curr_w < self.min_size:
+            # print(f"⚠️ [TRANSFORMS] Image too small for crop ({curr_w}x{curr_h} < {self.min_size}). Skipping.")
+            return images, annotations, metas
+
+        # Use the safer min() check to ensure we don't pick a crop larger than the image
+        target_h = min(self.max_size, curr_h)
+        target_w = min(self.max_size, curr_w)
+
+        crop_h = random.randint(self.min_size, target_h)
+        crop_w = random.randint(self.min_size, target_w)
+        
+        # Standard RandomCrop.get_params to find i, j
         crop_ijhw = T.RandomCrop.get_params(images[0], (crop_h, crop_w))
 
         # Crop the cropped annotations:
@@ -243,16 +256,15 @@ class MultiRandomCrop:
             _annotation["bbox"] = _annotation["bbox"] - torch.tensor([_j, _i, _j, _i])  # (x1,y1,x2,y2) - (j,i,j,i)
             _bbox = _annotation["bbox"].clone()
             _max_wh = torch.tensor([_w, _h])
+            
             # If the crop box is out of the image, we need to adjust the bbox:
             _bbox = torch.min(_bbox.reshape(-1, 2, 2), _max_wh)
             _bbox = _bbox.clamp(min=0)
-            # We need to find the legal bbox:
-            # _legal_idxs = torch.all(
-            #     torch.tensor(_bbox[:, 1, :] > _bbox[:, 0, :]), dim=1
-            # )
+            
             _legal_idxs = torch.all(
                 _bbox[:, 1, :] > _bbox[:, 0, :], dim=1
             )
+            
             # Reshape to the original format:
             _bbox = _bbox.reshape(-1, 4)
             _need_to_select_fields = ["bbox", "category", "id", "visibility"]
@@ -264,7 +276,8 @@ class MultiRandomCrop:
 
         # Check all annotations' legality:
         _is_legals = torch.tensor([_annotation["is_legal"] for _annotation in _annotations])
-        # If all annotations are illegal, we need to return the original images and annotations:
+        
+        # If the crop results in zero visible objects, skip the crop to avoid "Empty Batch" errors
         if not _is_legals.all().item():
             return images, annotations, metas
         else:
@@ -277,8 +290,8 @@ class MultiRandomCrop:
                 raise NotImplementedError(f"The input image type {type(images)} is not supported.")
             annotations = _annotations
             return images, annotations, metas
-
-
+        
+        
 class MultiColorJitter:
     def __init__(
             self,
