@@ -107,6 +107,8 @@ def submit_and_evaluate(config: dict):
         inference_only_detr=config["INFERENCE_ONLY_DETR"] if config["INFERENCE_ONLY_DETR"] is not None
         else config["ONLY_DETR"],
         dtype=config.get("INFERENCE_DTYPE", "FP32"),
+        use_parallel_val = config.get("USE_PARALLEL", False),
+        num_parallel_cores = config.get("NUM_PARALLEL_CORES", 1)
     )
 
     if metrics is not None:
@@ -144,6 +146,8 @@ def submit_and_evaluate_one_model(
         area_thresh: int = 0,
         inference_only_detr: bool = False,
         dtype: str = "FP32",
+        use_parallel_val : bool =  False,
+        num_parallel_cores : int =1
 ):
     # Build the datasets:
     inference_dataset = dataset_classes[dataset](
@@ -304,8 +308,8 @@ def submit_and_evaluate_one_model(
                 "--SKIP_SPLIT_FOL": "True",
                 "--TRACKERS_TO_EVAL": "",
                 "--TRACKER_SUB_FOLDER": "",
-                "--USE_PARALLEL": "True",
-                "--NUM_PARALLEL_CORES": "8",
+                "--USE_PARALLEL": "True" if use_parallel_val else "False",
+                "--NUM_PARALLEL_CORES": str(num_parallel_cores),
                 "--PLOT_CURVES": "False",
                 "--TRACKERS_FOLDER": tracker_dir,
                 "--BENCHMARK": benchmark,

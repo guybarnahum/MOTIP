@@ -1,0 +1,81 @@
+# configs/multi_class/stability_test.yaml
+
+# ------------------------------------------------------------------------
+# STABILITY TEST: 100-Frame Dataset / 3-Epoch Verification
+# ------------------------------------------------------------------------
+
+# Base Architecture
+SUPER_CONFIG_PATH: ./configs/r50_deformable_detr_motip_dancetrack.yaml
+root_path: "."
+
+# Seed for Reproducibility
+SEED: 12
+
+# Dataset & Classes
+NUM_CLASSES: 2
+NUM_ID_VOCABULARY: 1000
+
+# Weights Initialization
+DETR_PRETRAIN: ./pretrains/motip_dancetrack.pth
+RESUME_OPTIMIZER: False
+RESUME_SCHEDULER: False
+
+# ------------------------------------------------------------------------
+# Shortened Strategy for Stability Verification
+# ------------------------------------------------------------------------
+EPOCHS: 3
+LR: 2.0e-5
+LR_DROP: 2
+LR_BACKBONE: 2.0e-6
+LR_WARMUP_EPOCHS: 1
+
+# Learning Rate Scaling for Dictionary
+LR_DICTIONARY_SCALE: 1.0
+
+# Sampling Strategy 
+sampler_lengths: [5]
+sample_intervals: [2, 3]
+
+# ------------------------------------------------------------------------
+# Hardware Safety (A10G / 24GB VRAM)
+# ------------------------------------------------------------------------
+BATCH_SIZE: 1
+ACCUMULATE_STEPS: 4
+
+# Stability Tuning: Low overhead settings to prevent system lockups
+NUM_WORKERS: 0
+PREFETCH_FACTOR: null
+
+# Global flags for memory safety on A10G
+MEMORY_EFFICIENT: True
+USE_DECODER_CHECKPOINT: True
+
+# Training Image Resolution (Stability Tuned)
+AUG_MAX_SIZE: 640
+AUG_RANDOM_RESIZE: [256, 384, 448]
+AUG_RESIZE_SCALES: [400, 480, 512, 544, 576, 608]
+
+# Quality Priority: Preserved at 4 points
+DETR_DEC_N_POINTS: 4
+DETR_ENC_N_POINTS: 4
+
+# ------------------------------------------------------------------------
+# Validation Config - Targeted for your new Test Dataset
+# ------------------------------------------------------------------------
+val_config:
+  GT_FOLDER: "./datasets/DanceTrack/val"
+  SEQMAP_FILE: "./datasets/DanceTrack/val_seqmap.txt"
+  SPLIT_TO_EVAL: "val"
+  CLASSES_TO_EVAL: ['pedestrian', 'car'] 
+  CLASS_NAME_TO_ID: 
+    pedestrian: 1
+    car: 2
+
+# STABILITY FIX: Lowered from 1440 to 800 to prevent VRAM spikes during Eval.
+INFERENCE_MAX_LONGER: 800
+ASSIGNMENT_PROTOCOL: object-max
+DET_THRESH: 0.3
+ID_THRESH: 0.2
+
+USE_PARALLEL: False
+NUM_PARALLEL_CORES: 1
