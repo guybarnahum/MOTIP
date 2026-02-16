@@ -73,7 +73,7 @@ val_config:
 
 # STABILITY FIX: Lowered from 1440 to 800 to prevent VRAM spikes during Eval.
 INFERENCE_MAX_LONGER: 800
-ASSIGNMENT_PROTOCOL: object-max
+# ASSIGNMENT_PROTOCOL: object-max
 DET_THRESH: 0.3
 ID_THRESH: 0.2
 
