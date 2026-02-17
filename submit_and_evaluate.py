@@ -5,7 +5,7 @@ import os
 import json
 import time
 import torch
-import gc
+import random
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 from accelerate import Accelerator
@@ -116,70 +116,144 @@ def submit_and_evaluate(config: dict):
         metrics.sync()
         logger.metrics(log="Eval Result: ", metrics=metrics, fmt="{global_average:.4f}")
 
-def submit_and_evaluate_one_model(
-        is_evaluate, accelerator, state, logger, model, data_root, dataset, data_split, outputs_dir,
-        val_config=None, image_max_shorter=800, image_max_longer=1536, size_divisibility=0,
-        use_sigmoid=False, assignment_protocol="hungarian", miss_tolerance=30,
-        det_thresh=0.5, newborn_thresh=0.5, id_thresh=0.1, area_thresh=0,
-        inference_only_detr=False, dtype="FP32", **kwargs
-):
-    inf_ds = dataset_classes[dataset](data_root=data_root, split=data_split, load_annotation=False)
-    torch_dtype = torch.float32 if dtype == "FP32" else torch.float16
-    _seqs = sorted(list(inf_ds.sequence_infos.keys()))
-    for i, name in enumerate(_seqs):
-        if i % state.num_processes != state.process_index:
-            inf_ds.sequence_infos.pop(name); inf_ds.image_paths.pop(name)
 
-    # 🚀 STREAMING INFERENCE LOOP
-    for sequence_name in inf_ds.sequence_infos.keys():
-        seq_ds = SeqDataset(inf_ds.sequence_infos[sequence_name], inf_ds.image_paths[sequence_name],
-                            image_max_shorter, image_max_longer, size_divisibility, torch_dtype)
-        loader = DataLoader(seq_ds, batch_size=1, shuffle=False, num_workers=4, collate_fn=lambda x: x[0])
-        tracker = RuntimeTracker(model, seq_ds.seq_hw(), use_sigmoid, assignment_protocol, 
-                                 miss_tolerance, det_thresh, newborn_thresh, id_thresh, 
-                                 area_thresh, inference_only_detr, torch_dtype)
+def submit_and_evaluate_one_model(
+        is_evaluate: bool,
+        accelerator: Accelerator,
+        state: PartialState,
+        logger: Logger,
+        model,
+        data_root: str,
+        dataset: str,
+        data_split: str,
+        outputs_dir: str,
+        val_config: dict = None,
+        image_max_shorter: int = 800,
+        image_max_longer: int = 800,
+        size_divisibility: int = 0,
+        use_sigmoid: bool = False,
+        assignment_protocol: str = "hungarian",
+        miss_tolerance: int = 30,
+        det_thresh: float = 0.4,
+        newborn_thresh: float = 0.4,
+        id_thresh: float = 0.1,
+        area_thresh: int = 0,
+        inference_only_detr: bool = False,
+        dtype: str = "FP32",
+        limit_frames: int = None,
+        **kwargs
+):
+    # 1. Dataset & Type Setup
+    inference_dataset = dataset_classes[dataset](data_root=data_root, split=data_split, load_annotation=False)
+    torch_dtype = torch.float32 if dtype == "FP32" else torch.float16
+    
+    # 2. Multi-GPU Sequence Splitting (DDP Friendly)
+    _seq_names = sorted(list(inference_dataset.sequence_infos.keys()))
+    for i, name in enumerate(_seq_names):
+        if i % state.num_processes != state.process_index:
+            inference_dataset.sequence_infos.pop(name)
+            inference_dataset.image_paths.pop(name)
+
+    # 3. Reproducibility Seed for Windowing
+    # Using a fixed seed ensures we pick the same "random" slice every epoch
+    eval_rng = random.Random(42) 
+
+    num_seqs = len(inference_dataset.sequence_infos)
+    
+    # 4. Main Streaming Loop
+    for s_idx, sequence_name in enumerate(inference_dataset.sequence_infos.keys()):
+        seq_ds = SeqDataset(
+            seq_info=inference_dataset.sequence_infos[sequence_name],
+            image_paths=inference_dataset.image_paths[sequence_name],
+            max_shorter=image_max_shorter, max_longer=image_max_longer,
+            size_divisibility=size_divisibility, dtype=torch_dtype
+        )
+        loader = DataLoader(dataset=seq_ds, batch_size=1, shuffle=False, num_workers=4, collate_fn=lambda x: x[0])
+        tracker = RuntimeTracker(
+            model=model, sequence_hw=seq_ds.seq_hw(), use_sigmoid=use_sigmoid,
+            assignment_protocol=assignment_protocol, miss_tolerance=miss_tolerance,
+            det_thresh=det_thresh, newborn_thresh=newborn_thresh, id_thresh=id_thresh,
+            area_thresh=area_thresh, only_detr=inference_only_detr, dtype=torch_dtype
+        )
+
         memory = LongTermMemory(patience=900) if LongTermMemory else None
         
+        # Determine the Window [start_frame, end_frame)
+        total_frames = len(loader)
+        start_frame = 0
+        if limit_frames and total_frames > limit_frames:
+            # We use eval_rng.randint to stay reproducible across epochs
+            start_frame = eval_rng.randint(0, total_frames - limit_frames)
+        
+        actual_limit = limit_frames if limit_frames else total_frames
+        end_frame = start_frame + actual_limit
+
         tracker_path = os.path.join(outputs_dir, "tracker")
         os.makedirs(tracker_path, exist_ok=True)
         txt_path = os.path.join(tracker_path, f"{sequence_name}.txt")
 
-        # Open file once per sequence and write frame-by-frame
+        # Stream directly to disk to save RAM
         with open(txt_path, "w") as f:
-            logger.info(f"Streaming {sequence_name} to disk...", only_main=False)
             start_time = time.time()
+            logger.info(f"▶️ [{s_idx+1}/{num_seqs}] Seq: {sequence_name} | Window: {start_frame}→{end_frame}", only_main=False)
+            
             for t, (image, _) in enumerate(loader):
+                # Skip to start of window
+                if t < start_frame:
+                    continue
+                # Break at end of window
+                if t >= end_frame:
+                    break 
+                
                 image.tensors, image.mask = image.tensors.cuda(), image.mask.cuda()
                 tracker.update(image=image)
                 res = tracker.get_track_results()
                 
+                # Apply LongTermMemory re-ID mapping if active
                 if memory and "embeddings" in res and len(res["id"]) > 0:
                     id_map = memory.update(t, res["id"].tolist(), res["embeddings"])
-                    res["id"] = torch.tensor([id_map.get(rid, rid) for rid in res["id"].tolist()], dtype=torch.int64)
+                    new_ids = [id_map.get(rid, rid) for rid in res["id"].tolist()]
+                    res["id"] = torch.tensor(new_ids, dtype=torch.int64)
 
-                # Write immediately
+                # Format as MOTChallenge: <frame>, <id>, <x>, <y>, <w>, <h>, <conf>, -1, -1, -1
                 for obj_id, bbox in zip(res["id"], res["bbox"]):
                     f.write(f"{t+1},{obj_id.item()},{bbox[0].item()},{bbox[1].item()},{bbox[2].item()},{bbox[3].item()},1,-1,-1,-1\n")
                 
-                # Free memory immediately
+                # Progress logging every 50 frames
+                processed_count = t + 1 - start_frame
+                if processed_count % 50 == 0:
+                    logger.info(f"   ∟ Progress: {processed_count}/{actual_limit} frames...", only_main=False)
+                
+                # Memory Cleanup
                 del res
-                if t % 100 == 0: torch.cuda.empty_cache()
+                if t % 100 == 0:
+                    torch.cuda.empty_cache()
             
-            fps = len(loader) / (time.time() - start_time)
-            logger.success(f"Finished {sequence_name} | FPS: {fps:.2f}", only_main=False)
+            fps = processed_count / max(1e-5, (time.time() - start_time))
+            logger.success(f"✅ Finished {sequence_name} | FPS: {fps:.1f}", only_main=False)
 
     accelerator.wait_for_everyone()
-    if not is_evaluate: return None
+    
+    if not is_evaluate:
+        return None
 
+    # Final LiteMOT Metric Aggregation
     metrics = Metrics()
     if accelerator.is_main_process:
-        logger.info("🚀 LiteEval: Calculating global metrics...", only_main=True)
+        logger.info("📊 LiteEval: Calculating epoch vitals...", only_main=True)
+        tracker_dir = os.path.join(outputs_dir, "tracker")
         gt_root = val_config.get("GT_FOLDER") if val_config else os.path.join(data_root, dataset, data_split)
-        res = lite_mot_eval(os.path.join(outputs_dir, "tracker"), gt_root)
-        metrics["MOTA"].update(res["MOTA"]); metrics["IDF1"].update(res["IDF1"]); metrics["HOTA"].update(0.0)
-        logger.success(f"MOTA: {res['MOTA']:.4f} | IDF1: {res['IDF1']:.4f}", only_main=True)
+        
+        lite_res = lite_mot_eval(tracker_dir, gt_root)
+        
+        metrics["MOTA"].update(lite_res["MOTA"])
+        metrics["IDF1"].update(lite_res["IDF1"])
+        metrics["HOTA"].update(0.0) # Placeholder for standalone TrackEval audit
+        
+        logger.success(f"MOTA: {lite_res['MOTA']:.4f} | IDF1: {lite_res['IDF1']:.4f}", only_main=True)
         
     return metrics
+
 
 if __name__ == '__main__':
     opt = runtime_option()
