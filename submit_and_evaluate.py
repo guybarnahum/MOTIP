@@ -6,6 +6,7 @@ import json
 import time
 import torch
 import subprocess
+import gc
 from accelerate import Accelerator
 from accelerate.state import PartialState
 from torch.utils.data import DataLoader
@@ -95,6 +96,7 @@ def submit_and_evaluate(config: dict):
         dataset=config["INFERENCE_DATASET"],
         data_split=config["INFERENCE_SPLIT"],
         outputs_dir=outputs_dir,
+        val_config=config.get("VAL_CONFIG", None),
         image_max_longer=config["INFERENCE_MAX_LONGER"],    # the max shorter side of the image is set to 800 by default
         size_divisibility=config.get("SIZE_DIVISIBILITY", 0),
         use_sigmoid=config.get("USE_FOCAL_LOSS", False),
@@ -284,7 +286,7 @@ def submit_and_evaluate_one_model(
             gt_dir = os.path.join(data_root, dataset, data_split)
             seqmap_file = os.path.join(data_root, dataset, f"{data_split}_seqmap.txt")
             benchmark = "MOT17"
-            classes_to_eval = None # Default: Let TrackEval decide (usually pedestrian)
+            classes_to_eval = ["pedestrian"] # Default
 
             # Override with val_config if present
             if val_config is not None:
@@ -299,55 +301,52 @@ def submit_and_evaluate_one_model(
                 benchmark = "person_path_22"
                 seqmap_file = os.path.join(data_root, dataset, "gts", "seqmaps", "person_path_22-test.txt")
 
-            # Construct Arguments
-            args = {
-                "--SPLIT_TO_EVAL": data_split,
-                "--METRICS": ["HOTA", "CLEAR", "Identity"],
-                "--GT_FOLDER": gt_dir,
-                "--SEQMAP_FILE": seqmap_file,
-                "--SKIP_SPLIT_FOL": "True",
-                "--TRACKERS_TO_EVAL": "",
-                "--TRACKER_SUB_FOLDER": "",
-                "--USE_PARALLEL": "True" if use_parallel_val else "False",
-                "--NUM_PARALLEL_CORES": str(num_parallel_cores),
-                "--PLOT_CURVES": "False",
-                "--TRACKERS_FOLDER": tracker_dir,
-                "--BENCHMARK": benchmark,
-            }
-
-            if classes_to_eval is not None:
-                args["--CLASSES_TO_EVAL"] = classes_to_eval
-
-            # Decide which script to run
-            if dataset == "PersonPath22_Inference":
-                cmd = ["python", "TrackEval/scripts/run_person_path_22.py"]
-            else:
-                cmd = ["python", "TrackEval/scripts/run_mot_challenge.py"]
-
-            # Append args to command
-            for k, v in args.items():
-                cmd.append(k)
-                if isinstance(v, list):
-                    cmd += v
-                else:
-                    cmd.append(v)
-            
             # Clone current environment
             eval_env = os.environ.copy()
-            
-            # Check config for custom mapping and inject as JSON string
             if val_config and "CLASS_NAME_TO_ID" in val_config:
                 if accelerator.is_main_process:
                     logger.info(f"Passing custom class mapping to TrackEval: {val_config['CLASS_NAME_TO_ID']}", only_main=True)
                 eval_env["TRACKEVAL_CLASS_MAP"] = json.dumps(val_config["CLASS_NAME_TO_ID"])
 
-            # Execute TrackEval with the new environment
-            _ = subprocess.run(cmd, env=eval_env)
-            
-            if _.returncode == 0:
-                logger.success("Evaluation script is done.", only_main=True)
-            else:
-                raise RuntimeError("Evaluation script failed.")
+            # --- SERIAL SPLIT-CLASS EVALUATION LOOP ---
+            for target_class in classes_to_eval:
+                logger.info(f"🚀 Evaluating single class to save RAM: {target_class}", only_main=True)
+                
+                args = {
+                    "--SPLIT_TO_EVAL": data_split,
+                    "--METRICS": ["HOTA", "CLEAR", "Identity"],
+                    "--GT_FOLDER": gt_dir,
+                    "--SEQMAP_FILE": seqmap_file,
+                    "--SKIP_SPLIT_FOL": "True",
+                    "--TRACKERS_TO_EVAL": "",
+                    "--TRACKER_SUB_FOLDER": "",
+                    "--USE_PARALLEL": "True" if use_parallel_val else "False",
+                    "--NUM_PARALLEL_CORES": str(num_parallel_cores),
+                    "--PLOT_CURVES": "False",
+                    "--TRACKERS_FOLDER": tracker_dir,
+                    "--BENCHMARK": benchmark,
+                    "--CLASSES_TO_EVAL": target_class, # Force single class
+                }
+
+                # Decide script
+                if dataset == "PersonPath22_Inference":
+                    cmd = ["python", "TrackEval/scripts/run_person_path_22.py"]
+                else:
+                    cmd = ["python", "TrackEval/scripts/run_mot_challenge.py"]
+
+                # Append args
+                for k, v in args.items():
+                    cmd.append(k)
+                    cmd.append(v)
+
+                # Execute
+                _ = subprocess.run(cmd, env=eval_env)
+                
+                # CRITICAL: Purge memory between classes
+                gc.collect()
+                torch.cuda.empty_cache()
+
+            logger.success("All classes evaluated serially.", only_main=True)
 
         # Wait for all processes:
         accelerator.wait_for_everyone()
@@ -366,7 +365,7 @@ def submit_and_evaluate_one_model(
         
         eval_metrics_path = os.path.join(outputs_dir, "tracker", f"{primary_class}_summary.txt")
         
-        # Fallback check: if primary class summary doesn't exist, try pedestrian
+        # Fallback check
         if not os.path.exists(eval_metrics_path):
              alt_path = os.path.join(outputs_dir, "tracker", "pedestrian_summary.txt")
              if os.path.exists(alt_path):
