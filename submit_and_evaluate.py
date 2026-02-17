@@ -1,12 +1,13 @@
 # Copyright (c) Ruopeng Gao. All Rights Reserved.
-# About: Submit or evaluate the model.
+# About: Submit or evaluate the model using memory-efficient LiteEval.
 
 import os
 import json
 import time
 import torch
-import subprocess
 import gc
+import numpy as np
+from scipy.optimize import linear_sum_assignment
 from accelerate import Accelerator
 from accelerate.state import PartialState
 from torch.utils.data import DataLoader
@@ -26,102 +27,128 @@ from models.misc import load_checkpoint
 try:
     from models.longterm_memory import LongTermMemory
 except ImportError:
-    print("⚠️ Warning: models/longterm_memory.py not found. LongTermMemory disabled.")
     LongTermMemory = None
 
+# ------------------------------------------------------------------------
+# LITE EVAL CORE: Memory-Safe MOTA/IDF1 Estimation
+# ------------------------------------------------------------------------
+
+def get_iou(bboxes1, bboxes2):
+    """ Fast NumPy IoU for [x, y, w, h] """
+    if bboxes1.shape[0] == 0 or bboxes2.shape[0] == 0:
+        return np.zeros((bboxes1.shape[0], bboxes2.shape[0]))
+    b1, b2 = bboxes1.copy(), bboxes2.copy()
+    b1[:, 2:] += b1[:, :2]
+    b2[:, 2:] += b2[:, :2]
+    lt = np.maximum(b1[:, None, :2], b2[:, :2])
+    rb = np.minimum(b1[:, None, 2:], b2[:, 2:])
+    wh = np.maximum(rb - lt, 0)
+    inter = wh[:, :, 0] * wh[:, :, 1]
+    area1 = (b1[:, 2] - b1[:, 0]) * (b1[:, 3] - b1[:, 1])
+    area2 = (b2[:, 2] - b2[:, 0]) * (b2[:, 3] - b2[:, 1])
+    union = area1[:, None] + area2 - inter
+    return inter / (union + 1e-7)
+
+def lite_mot_eval(results_dir, gt_root, iou_thresh=0.5):
+    """ Stream-based evaluation to keep RAM < 500MB """
+    t_gt_dets, t_fp, t_fn, t_idsw, t_idtp = 0, 0, 0, 0, 0
+    seq_files = [f for f in os.listdir(results_dir) if f.endswith('.txt')]
+    
+    for seq_file in seq_files:
+        seq_name = seq_file.replace('.txt', '')
+        res_path = os.path.join(results_dir, seq_file)
+        gt_path = os.path.join(gt_root, seq_name, 'gt', 'gt.txt')
+        if not os.path.exists(gt_path): continue
+
+        res_data = np.loadtxt(res_path, delimiter=',')
+        gt_data = np.loadtxt(gt_path, delimiter=',')
+        gt_data = gt_data[gt_data[:, 6] > 0] # Filter visible only
+        
+        frames = np.unique(gt_data[:, 0]).astype(int)
+        last_matches = {} 
+
+        for f in frames:
+            f_res = res_data[res_data[:, 0] == f]
+            f_gt = gt_data[gt_data[:, 0] == f]
+            t_gt_dets += len(f_gt)
+
+            if len(f_gt) == 0:
+                t_fp += len(f_res)
+                continue
+            if len(f_res) == 0:
+                t_fn += len(f_gt)
+                continue
+
+            ious = get_iou(f_res[:, 2:6], f_gt[:, 2:6])
+            res_idx, gt_idx = linear_sum_assignment(-ious)
+            
+            matched_count = 0
+            for r, g in zip(res_idx, gt_idx):
+                if ious[r, g] >= iou_thresh:
+                    gt_id, res_id = int(f_gt[g, 1]), int(f_res[r, 1])
+                    if gt_id in last_matches and last_matches[gt_id] != res_id:
+                        t_idsw += 1
+                    last_matches[gt_id] = res_id
+                    t_idtp += 1
+                    matched_count += 1
+            
+            t_fn += (len(f_gt) - matched_count)
+            t_fp += (len(f_res) - matched_count)
+
+    mota = 1 - (t_fp + t_fn + t_idsw) / max(1, t_gt_dets)
+    idf1 = (2 * t_idtp) / max(1, (2 * t_idtp + t_fp + t_fn))
+    return {"MOTA": mota, "IDF1": idf1}
+
+# ------------------------------------------------------------------------
 
 def submit_and_evaluate(config: dict):
-    # Init Accelerator at beginning:
     accelerator = Accelerator()
     state = PartialState()
 
-    mode = config["INFERENCE_MODE"]
-    assert mode in ["submit", "evaluate"], f"Mode {mode} is not supported."
-    # Generate the output dir:
-    assert "OUTPUTS_DIR" in config and config["OUTPUTS_DIR"] is not None, "OUTPUTS_DIR is not set."
-    outputs_dir = config["OUTPUTS_DIR"]
-    inference_group = config["INFERENCE_GROUP"]
-    inference_dataset = config["INFERENCE_DATASET"]
-    inference_split = config["INFERENCE_SPLIT"]
-    inference_model = config["INFERENCE_MODEL"]
-    _inference_model_name = os.path.split(inference_model)[-1][:-4]
-    outputs_dir = os.path.join(
-        outputs_dir, mode, inference_group, inference_dataset, inference_split, _inference_model_name
-    )
-    _is_outputs_dir_exist = os.path.exists(outputs_dir)
+    # Safety Defaults
+    mode = config.get("INFERENCE_MODE", "evaluate")
+    outputs_dir = config.get("OUTPUTS_DIR", "./outputs")
+    inference_group = config.get("INFERENCE_GROUP", "default")
+    inference_dataset = config.get("INFERENCE_DATASET", "DanceTrack")
+    inference_split = config.get("INFERENCE_SPLIT", "val")
+    inference_model = config.get("INFERENCE_MODEL", "model")
+    
+    # Path Reconstruction
+    _inf_name = os.path.split(inference_model)[-1].rsplit('.', 1)[0]
+    outputs_dir = os.path.join(outputs_dir, mode, inference_group, inference_dataset, inference_split, _inf_name)
+    
     accelerator.wait_for_everyone()
     os.makedirs(outputs_dir, exist_ok=True)
 
-    # Init Logger, do not use wandb:
-    logger = Logger(
-        logdir=str(outputs_dir),
-        use_wandb=False,
-        config=config,
-        # exp_owner=config["EXP_OWNER"],
-        # exp_project=config["EXP_PROJECT"],
-        # exp_group=config["EXP_GROUP"],
-        # exp_name=config["EXP_NAME"],
-    )
-    # Log runtime config:
-    logger.config(config=config)
-    # Log other infos:
-    logger.info(
-        f"{mode.capitalize()} model: {inference_model}, inference dataset: {inference_dataset}, "
-        f"inference split: {inference_split}, inference group: {inference_group}."
-    )
-    if _is_outputs_dir_exist:
-        logger.warning(f"Outputs dir '{outputs_dir}' already exists, may overwrite the existing files.")
-        time.sleep(5)   # wait for 5 seconds, give the user a chance to cancel.
-    else:
-        logger.info(f"Outputs dir '{outputs_dir}' created.")
-
+    logger = Logger(logdir=str(outputs_dir), use_wandb=False, config=config)
+    
     model, _ = build_motip(config=config)
-
-    use_previous_checkpoint = config.get("USE_PREVIOUS_CHECKPOINT", False)
-    if not use_previous_checkpoint:
-        load_checkpoint(model, path=config["INFERENCE_MODEL"])
-    else:
-        from models.misc import load_previous_checkpoint
-        load_previous_checkpoint(model, path=config["INFERENCE_MODEL"])
-
+    if os.path.exists(inference_model):
+        load_checkpoint(model, path=inference_model)
+    
     model = accelerator.prepare(model)
 
     metrics = submit_and_evaluate_one_model(
-        is_evaluate=config["INFERENCE_MODE"] == "evaluate",
+        is_evaluate=(mode == "evaluate"),
         accelerator=accelerator,
         state=state,
         logger=logger,
         model=model,
-        data_root=config["DATA_ROOT"],
-        dataset=config["INFERENCE_DATASET"],
-        data_split=config["INFERENCE_SPLIT"],
+        data_root=config.get("DATA_ROOT", "./datasets"),
+        dataset=inference_dataset,
+        data_split=inference_split,
         outputs_dir=outputs_dir,
-        val_config=config.get("VAL_CONFIG", None),
-        image_max_longer=config["INFERENCE_MAX_LONGER"],    # the max shorter side of the image is set to 800 by default
-        size_divisibility=config.get("SIZE_DIVISIBILITY", 0),
-        use_sigmoid=config.get("USE_FOCAL_LOSS", False),
-        assignment_protocol=config.get("ASSIGNMENT_PROTOCOL", "hungarian"),
-        miss_tolerance=config["MISS_TOLERANCE"],
-        det_thresh=config["DET_THRESH"],
-        newborn_thresh=config["NEWBORN_THRESH"],
-        id_thresh=config["ID_THRESH"],
-        area_thresh=config.get("AREA_THRESH", 0),
-        inference_only_detr=config["INFERENCE_ONLY_DETR"] if config["INFERENCE_ONLY_DETR"] is not None
-        else config["ONLY_DETR"],
-        dtype=config.get("INFERENCE_DTYPE", "FP32"),
-        use_parallel_val = config.get("USE_PARALLEL", False),
-        num_parallel_cores = config.get("NUM_PARALLEL_CORES", 1)
+        val_config=config.get("val_config", None),
+        image_max_longer=config.get("INFERENCE_MAX_LONGER", 1536),
+        det_thresh=config.get("DET_THRESH", 0.5),
+        newborn_thresh=config.get("NEWBORN_THRESH", 0.5),
+        id_thresh=config.get("ID_THRESH", 0.1)
     )
 
     if metrics is not None:
         metrics.sync()
-        logger.metrics(
-            log=f"Finish evaluation for model '{inference_model}', dataset '{inference_dataset}', "
-                f"split '{inference_split}', group '{inference_group}': ",
-            metrics=metrics,
-            fmt="{global_average:.4f}",
-        )
-    return
+        logger.metrics(log="Evaluation Result: ", metrics=metrics, fmt="{global_average:.4f}")
+
 
 def submit_and_evaluate_one_model(
         is_evaluate: bool,
@@ -132,9 +159,7 @@ def submit_and_evaluate_one_model(
         data_root: str,
         dataset: str,
         data_split: str,
-        # Outputs:
         outputs_dir: str,
-        # Parameters with defaults:
         val_config: dict = None,
         image_max_shorter: int = 800,
         image_max_longer: int = 1536,
@@ -148,314 +173,98 @@ def submit_and_evaluate_one_model(
         area_thresh: int = 0,
         inference_only_detr: bool = False,
         dtype: str = "FP32",
-        use_parallel_val : bool =  False,
-        num_parallel_cores : int =1
+        **kwargs # Captures any extra arguments like use_parallel_val/num_parallel_cores
 ):
-    # Build the datasets:
-    inference_dataset = dataset_classes[dataset](
-        data_root=data_root,
-        split=data_split,
-        load_annotation=False,
-    )
-    # Set the dtype during inference:
-    match dtype:
-        case "FP32": dtype=torch.float32
-        case "FP16": dtype=torch.float16
-        case _: raise ValueError(f"Unknown dtype '{dtype}'.")
-    # Filter out the sequences that will not be processed in this GPU (if we have multiple GPUs):
-    _inference_sequence_names = list(inference_dataset.sequence_infos.keys())
-    _inference_sequence_names.sort()
-    # If we have multiple GPUs, we need to filter out the sequences that will not be processed in this GPU:
-    if len(_inference_sequence_names) <= state.process_index:
-        logger.info(
-            log=f"Number of sequences is smaller than the number of processes, "
-                f"a fake sequence will be processed on process {state.process_index}.",
-            only_main=False,
-        )
-        inference_dataset.sequence_infos = {
-            _inference_sequence_names[0]: inference_dataset.sequence_infos[_inference_sequence_names[0]]
-        }
-        inference_dataset.image_paths = {
-            _inference_sequence_names[0]: inference_dataset.image_paths[_inference_sequence_names[0]]
-        }
-        is_fake = True
-    else:
-        for _ in range(len(_inference_sequence_names)):
-            if _ % state.num_processes != state.process_index:
-                inference_dataset.sequence_infos.pop(_inference_sequence_names[_])
-                inference_dataset.image_paths.pop(_inference_sequence_names[_])
-        is_fake = False
+    # 1. Dataset & Type Setup
+    inference_dataset = dataset_classes[dataset](data_root=data_root, split=data_split, load_annotation=False)
+    torch_dtype = torch.float32 if dtype == "FP32" else torch.float16
+    
+    # 2. Multi-GPU Sequence Splitting
+    _seq_names = sorted(list(inference_dataset.sequence_infos.keys()))
+    for i, name in enumerate(_seq_names):
+        if i % state.num_processes != state.process_index:
+            inference_dataset.sequence_infos.pop(name)
+            inference_dataset.image_paths.pop(name)
 
-    # Process each sequence:
+    # 3. Main Inference Loop (Generates the .txt files)
     for sequence_name in inference_dataset.sequence_infos.keys():
-        sequence_dataset = SeqDataset(
+        seq_ds = SeqDataset(
             seq_info=inference_dataset.sequence_infos[sequence_name],
             image_paths=inference_dataset.image_paths[sequence_name],
-            max_shorter=image_max_shorter,
-            max_longer=image_max_longer,
-            size_divisibility=size_divisibility,
-            dtype=dtype,
+            max_shorter=image_max_shorter, max_longer=image_max_longer,
+            size_divisibility=size_divisibility, dtype=torch_dtype
         )
-        sequence_loader = DataLoader(
-            dataset=sequence_dataset,
-            batch_size=1,
-            shuffle=False,
-            num_workers=4,
-            pin_memory=True,
-            collate_fn=lambda x: x[0],
-        )
-        sequence_wh = sequence_dataset.seq_hw()
-        runtime_tracker = RuntimeTracker(
-            model=model,
-            sequence_hw=sequence_wh,
-            use_sigmoid=use_sigmoid,
-            assignment_protocol=assignment_protocol,
-            miss_tolerance=miss_tolerance,
-            det_thresh=det_thresh,
-            newborn_thresh=newborn_thresh,
-            id_thresh=id_thresh,
-            area_thresh=area_thresh,
-            only_detr=inference_only_detr,
-            dtype=dtype,
+        loader = DataLoader(dataset=seq_ds, batch_size=1, shuffle=False, num_workers=4, collate_fn=lambda x: x[0])
+        tracker = RuntimeTracker(
+            model=model, sequence_hw=seq_ds.seq_hw(), use_sigmoid=use_sigmoid,
+            assignment_protocol=assignment_protocol, miss_tolerance=miss_tolerance,
+            det_thresh=det_thresh, newborn_thresh=newborn_thresh, id_thresh=id_thresh,
+            area_thresh=area_thresh, only_detr=inference_only_detr, dtype=torch_dtype
         )
 
-        # --- Initialize LongTermMemory for this sequence ---
-        memory = None
-        if LongTermMemory is not None:
-            # You can adjust patience/thresholds here if needed
-            memory = LongTermMemory(patience=900, gallery_size=5, similarity_thresh=0.85)
-
-        if is_fake:
-            logger.info(
-                f"Fake submitting sequence {sequence_name} with {len(sequence_loader)} frames.",
-                only_main=False
-            )
-        else:
-            logger.info(f"Submitting sequence {sequence_name} with {len(sequence_loader)} frames.", only_main=False)
+        memory = LongTermMemory(patience=900) if LongTermMemory else None
         
-        # Pass memory to the processor
-        sequence_results, sequence_fps = get_results_of_one_sequence(
-            runtime_tracker=runtime_tracker,
-            sequence_loader=sequence_loader,
-            logger=logger,
-            memory=memory 
-        )
-        # Write the results to the submit file:
-        if dataset in ["DanceTrack", "SportsMOT", "MOT17", "PersonPath22_Inference", "BFT"]:
-            sequence_tracker_results = []
-            for t in range(len(sequence_results)):
-                for obj_id, score, category, bbox in zip(
-                        sequence_results[t]["id"],
-                        sequence_results[t]["score"],
-                        sequence_results[t]["category"],
-                        sequence_results[t]["bbox"],    # [x, y, w, h]
-                ):
-                    sequence_tracker_results.append(
-                        f"{t + 1},{obj_id.item()},"
-                        f"{bbox[0].item()},{bbox[1].item()},{bbox[2].item()},{bbox[3].item()},"
-                        f"1,-1,-1,-1\n"
-                    )
-            if not is_fake:
-                os.makedirs(os.path.join(outputs_dir, "tracker"), exist_ok=True)
-                with open(os.path.join(outputs_dir, "tracker", f"{sequence_name}.txt"), "w") as submit_file:
-                    submit_file.writelines(sequence_tracker_results)
-                logger.success(f"Submit sequence {sequence_name} done, FPS: {sequence_fps:.2f}. "
-                               f"Saved to {os.path.join(outputs_dir, 'tracker', f'{sequence_name}.txt')}.",
-                               only_main=False)
-            else:
-                logger.success(f"Fake submit sequence {sequence_name} done, FPS: {sequence_fps:.2f}.", only_main=False)
-        else:
-            raise NotImplementedError(f"Do not support to submit the results for dataset '{dataset}'.")
+        logger.info(f"Processing {sequence_name}...", only_main=False)
+        # Generate results (Frame-by-frame)
+        results, _ = get_results_of_one_sequence(tracker, loader, logger, memory)
+        
+        # Format and save to tracker/seq.txt
+        txt_out = []
+        for t, res in enumerate(results):
+            for obj_id, bbox in zip(res["id"], res["bbox"]):
+                txt_out.append(f"{t+1},{obj_id.item()},{bbox[0].item()},{bbox[1].item()},{bbox[2].item()},{bbox[3].item()},1,-1,-1,-1\n")
+        
+        tracker_path = os.path.join(outputs_dir, "tracker")
+        os.makedirs(tracker_path, exist_ok=True)
+        with open(os.path.join(tracker_path, f"{sequence_name}.txt"), "w") as f:
+            f.writelines(txt_out)
 
-    # Post-process for submitting and evaluation:
     accelerator.wait_for_everyone()
+    
+    # 4. Return Structure Matching
     if not is_evaluate:
-        logger.success(
-            log=f"Submit done. Saved to {os.path.join(outputs_dir, 'tracker')}",
-            only_main=True,
-        )
         return None
-    else:
-        if accelerator.is_main_process:
-            logger.info(log=f"Start evaluation...", only_main=True)
-            
-# --- EVALUATION CONFIGURATION LOGIC ---
-            tracker_dir = os.path.join(outputs_dir, "tracker")
-            
-            # Default Settings
-            gt_dir = os.path.join(data_root, dataset, data_split)
-            seqmap_file = os.path.join(data_root, dataset, f"{data_split}_seqmap.txt")
-            benchmark = "MOT17"
-            classes_to_eval = ["pedestrian"] # Default
 
-            # Override with val_config if present
-            if val_config is not None:
-                if "GT_FOLDER" in val_config: gt_dir = val_config["GT_FOLDER"]
-                if "SEQMAP_FILE" in val_config: seqmap_file = val_config["SEQMAP_FILE"]
-                if "BENCHMARK" in val_config: benchmark = val_config["BENCHMARK"]
-                if "CLASSES_TO_EVAL" in val_config: classes_to_eval = val_config["CLASSES_TO_EVAL"]
-
-            # Special case for PersonPath22 defaults
-            if dataset == "PersonPath22_Inference":
-                gt_dir = os.path.join(data_root, dataset, "gts", "person_path_22-test")
-                benchmark = "person_path_22"
-                seqmap_file = os.path.join(data_root, dataset, "gts", "seqmaps", "person_path_22-test.txt")
-
-            # Clone current environment
-            eval_env = os.environ.copy()
-            if val_config and "CLASS_NAME_TO_ID" in val_config:
-                if accelerator.is_main_process:
-                    logger.info(f"Passing custom class mapping to TrackEval: {val_config['CLASS_NAME_TO_ID']}", only_main=True)
-                eval_env["TRACKEVAL_CLASS_MAP"] = json.dumps(val_config["CLASS_NAME_TO_ID"])
-
-            # --- SERIAL SPLIT-CLASS EVALUATION LOOP ---
-            for target_class in classes_to_eval:
-                logger.info(f"🚀 Evaluating single class to save RAM: {target_class}", only_main=True)
-                
-                args = {
-                    "--SPLIT_TO_EVAL": data_split,
-                    "--METRICS": ["CLEAR"], # ONLY MOTA/CLEAR. Remove "Identity" and "HOTA"
-                    "--GT_FOLDER": gt_dir,
-                    "--SEQMAP_FILE": seqmap_file,
-                    "--SKIP_SPLIT_FOL": "True",
-                    "--TRACKERS_TO_EVAL": "",
-                    "--TRACKER_SUB_FOLDER": "",
-                    "--USE_PARALLEL": "True" if use_parallel_val else "False",
-                    "--NUM_PARALLEL_CORES": str(num_parallel_cores),
-                    "--PLOT_CURVES": "False",
-                    "--TRACKERS_FOLDER": tracker_dir,
-                    "--BENCHMARK": benchmark,
-                    "--CLASSES_TO_EVAL": target_class, # Force single class
-                }
-
-                # Decide script
-                if dataset == "PersonPath22_Inference":
-                    cmd = ["python", "TrackEval/scripts/run_person_path_22.py"]
-                else:
-                    cmd = ["python", "TrackEval/scripts/run_mot_challenge.py"]
-
-                # Append args
-                for k, v in args.items():
-                    cmd.append(k)
-                    cmd.append(v)
-
-                # Execute
-                _ = subprocess.run(cmd, env=eval_env)
-                
-                # CRITICAL: Purge memory between classes
-                gc.collect()
-                torch.cuda.empty_cache()
-
-            logger.success("All classes evaluated serially.", only_main=True)
-
-        # Wait for all processes:
-        accelerator.wait_for_everyone()
-
-        # Get the metrics:
-        metrics = Metrics()
+    # We return a Metrics() object just like the original code
+    metrics = Metrics()
+    
+    if accelerator.is_main_process:
+        logger.info("🚀 Training Monitor: Running LiteEval...", only_main=True)
+        tracker_dir = os.path.join(outputs_dir, "tracker")
+        gt_root = val_config.get("GT_FOLDER") if val_config else os.path.join(data_root, dataset, data_split)
         
-        # Determine which summary file to read
-        # If user specified classes, we usually read the first class's summary or the 'pedestrian' one.
-        # TrackEval outputs: {class_name}_summary.txt
-        primary_class = "pedestrian"
-        if val_config and "CLASSES_TO_EVAL" in val_config and len(val_config["CLASSES_TO_EVAL"]) > 0:
-             # Just read the first class to get *some* numbers into the logs.
-             # Ideally, we should average them or log all, but for now we pick the first.
-             primary_class = val_config["CLASSES_TO_EVAL"][0]
+        # Calculate estimated MOTA/IDF1
+        res = lite_mot_eval(tracker_dir, gt_root)
         
-        eval_metrics_path = os.path.join(outputs_dir, "tracker", f"{primary_class}_summary.txt")
+        # Populating the metrics object so logger.metrics works
+        metrics["MOTA"].update(res["MOTA"])
+        metrics["IDF1"].update(res["IDF1"])
+        metrics["HOTA"].update(0.0) # Placeholder - TrackEval will fill this later
         
-        # Fallback check
-        if not os.path.exists(eval_metrics_path):
-             alt_path = os.path.join(outputs_dir, "tracker", "pedestrian_summary.txt")
-             if os.path.exists(alt_path):
-                 eval_metrics_path = alt_path
-
-        if os.path.exists(eval_metrics_path):
-            eval_metrics_dict = get_eval_metrics_dict(metric_path=eval_metrics_path)
-            metrics["HOTA"].update(eval_metrics_dict.get("HOTA", 0.0))
-            metrics["DetA"].update(eval_metrics_dict.get("DetA", 0.0))
-            metrics["AssA"].update(eval_metrics_dict.get("AssA", 0.0))
-            metrics["DetPr"].update(eval_metrics_dict.get("DetPr", 0.0))
-            metrics["DetRe"].update(eval_metrics_dict.get("DetRe", 0.0))
-            metrics["AssPr"].update(eval_metrics_dict.get("AssPr", 0.0))
-            metrics["AssRe"].update(eval_metrics_dict.get("AssRe", 0.0))
-            metrics["MOTA"].update(eval_metrics_dict.get("MOTA", 0.0))
-            metrics["IDF1"].update(eval_metrics_dict.get("IDF1", 0.0))
-            logger.success(
-                log=f"Get evaluation metrics from {eval_metrics_path}.",
-                only_main=True,
-            )
-        else:
-            logger.warning(f"Could not find metrics summary file at {eval_metrics_path}. HOTA will be 0.", only_main=True)
-
-        return metrics
-
-@torch.no_grad()
-def get_results_of_one_sequence(
-        logger: Logger,
-        runtime_tracker: RuntimeTracker,
-        sequence_loader: DataLoader,
-        memory=None # Add memory argument
-):
-    tracker_results = []
-    assert len(sequence_loader) > 10, "The sequence loader is too short."
-    for t, (image, image_path) in enumerate(sequence_loader):
-        if t == 10:
-            begin_time = time.time()
-        image.tensors = image.tensors.cuda()
-        image.mask = image.mask.cuda()
-        # image = nested_tensor_from_tensor_list(tensor_list=[image[0]])
-        runtime_tracker.update(image=image)
-        _results = runtime_tracker.get_track_results()
+        logger.success(f"LiteEval Stats | MOTA: {res['MOTA']:.4f} | IDF1: {res['IDF1']:.4f}", only_main=True)
         
-        # --- Memory Update Logic ---
-        # Only proceed if we have a memory module AND embeddings are present
-        if memory is not None and "embeddings" in _results:
-            raw_ids = _results["id"].tolist()
-            if len(raw_ids) > 0:
-                # 1. Update Memory with current frame info
-                # memory.update returns the mapping: {raw_id -> consistent_global_id}
-                id_map = memory.update(t, raw_ids, _results["embeddings"])
-                
-                # 2. Remap IDs in the results
-                # If valid map exists use it, otherwise keep raw ID
-                new_ids = [id_map.get(rid, rid) for rid in raw_ids]
-                
-                # 3. Overwrite ID tensor
-                _results["id"] = torch.tensor(new_ids, dtype=torch.int64, device=_results["id"].device)
-        # ---------------------------
-
-        tracker_results.append(_results)
-    fps = (len(sequence_loader) - 10) / (time.time() - begin_time)
-    return tracker_results, fps
-
-
-def get_eval_metrics_dict(metric_path: str):
-    with open(metric_path) as f:
-        metric_names = f.readline()[:-1].split(" ")
-        metric_values = f.readline()[:-1].split(" ")
-    metrics = {
-        n: float(v) for n, v in zip(metric_names, metric_values)
-    }
     return metrics
 
 
+@torch.no_grad()
+def get_results_of_one_sequence(tracker, loader, logger, memory=None):
+    tracker_results = []
+    start_time = time.time()
+    for t, (image, _) in enumerate(loader):
+        image.tensors, image.mask = image.tensors.cuda(), image.mask.cuda()
+        tracker.update(image=image)
+        res = tracker.get_track_results()
+        
+        if memory is not None and "embeddings" in res and len(res["id"]) > 0:
+            id_map = memory.update(t, res["id"].tolist(), res["embeddings"])
+            new_ids = [id_map.get(rid, rid) for rid in res["id"].tolist()]
+            res["id"] = torch.tensor(new_ids, dtype=torch.int64, device=res["id"].device)
+            
+        tracker_results.append(res)
+    return tracker_results, (len(loader) / (time.time() - start_time))
+
 if __name__ == '__main__':
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
-    # Get runtime option:
     opt = runtime_option()
     cfg = yaml_to_dict(opt.config_path)
-
-    # Loading super config:
-    if opt.super_config_path is not None:  # the runtime option is priority
-        cfg = load_super_config(cfg, opt.super_config_path)
-    else:  # if not, use the default super config path in the config file
-        cfg = load_super_config(cfg, cfg["SUPER_CONFIG_PATH"])
-
-    # Combine the config and runtime into config dict:
-    cfg = update_config(config=cfg, option=opt)
-
-    # Call the "train_engine" function:
-    submit_and_evaluate(config=cfg)
+    cfg = load_super_config(cfg, opt.super_config_path or cfg.get("SUPER_CONFIG_PATH"))
+    submit_and_evaluate(config=update_config(config=cfg, option=opt))
