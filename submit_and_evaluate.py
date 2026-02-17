@@ -151,9 +151,9 @@ def submit_and_evaluate_one_model(
     if limit_frames is None and val_config is not None:
         limit_frames = val_config.get("LIMIT_VAL_FRAMES", None)
 
-    sys.stderr.write("f\n📊 Running LiteEval limit_frames:{limit_frames}}\n")
+    sys.stderr.write(f"\n📊 Running LiteEval limit_frames:{limit_frames}\n")
     sys.stderr.flush()
-    
+
     # 2. Setup Dataset
     inf_ds = dataset_classes[dataset](data_root=data_root, split=data_split, load_annotation=False)
     torch_dtype = torch.float32 if dtype == "FP32" else torch.float16
