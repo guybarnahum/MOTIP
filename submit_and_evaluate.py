@@ -314,7 +314,7 @@ def submit_and_evaluate_one_model(
                 
                 args = {
                     "--SPLIT_TO_EVAL": data_split,
-                    "--METRICS": ["CLEAR", "Identity"], # HOTA disabled
+                    "--METRICS": ["CLEAR"], # ONLY MOTA/CLEAR. Remove "Identity" and "HOTA"
                     "--GT_FOLDER": gt_dir,
                     "--SEQMAP_FILE": seqmap_file,
                     "--SKIP_SPLIT_FOL": "True",
