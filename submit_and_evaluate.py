@@ -143,24 +143,27 @@ def submit_and_evaluate_one_model(
         limit_frames: int = None,
         **kwargs
 ):
-    # 1. Dataset & Type Setup
+    # 1. Resolve Frame Limit: Prioritize explicit arg, then child of val_config
+    if limit_frames is None and val_config is not None:
+        limit_frames = val_config.get("LIMIT_VAL_FRAMES", None)
+    
+    # 2. Setup Dataset and Precision
     inference_dataset = dataset_classes[dataset](data_root=data_root, split=data_split, load_annotation=False)
     torch_dtype = torch.float32 if dtype == "FP32" else torch.float16
     
-    # 2. Multi-GPU Sequence Splitting (DDP Friendly)
+    # 3. Multi-GPU Sequence Splitting (DDP Friendly)
     _seq_names = sorted(list(inference_dataset.sequence_infos.keys()))
     for i, name in enumerate(_seq_names):
         if i % state.num_processes != state.process_index:
             inference_dataset.sequence_infos.pop(name)
             inference_dataset.image_paths.pop(name)
 
-    # 3. Reproducibility Seed for Windowing
-    # Using a fixed seed ensures we pick the same "random" slice every epoch
+    # 4. Reproducibility: Static Seed for Window Selection
+    import random
     eval_rng = random.Random(42) 
-
     num_seqs = len(inference_dataset.sequence_infos)
     
-    # 4. Main Streaming Loop
+    # 5. Streaming Inference Loop
     for s_idx, sequence_name in enumerate(inference_dataset.sequence_infos.keys()):
         seq_ds = SeqDataset(
             seq_info=inference_dataset.sequence_infos[sequence_name],
@@ -178,11 +181,10 @@ def submit_and_evaluate_one_model(
 
         memory = LongTermMemory(patience=900) if LongTermMemory else None
         
-        # Determine the Window [start_frame, end_frame)
+        # Random Windowing Logic [start_frame, end_frame)
         total_frames = len(loader)
         start_frame = 0
         if limit_frames and total_frames > limit_frames:
-            # We use eval_rng.randint to stay reproducible across epochs
             start_frame = eval_rng.randint(0, total_frames - limit_frames)
         
         actual_limit = limit_frames if limit_frames else total_frames
@@ -192,65 +194,56 @@ def submit_and_evaluate_one_model(
         os.makedirs(tracker_path, exist_ok=True)
         txt_path = os.path.join(tracker_path, f"{sequence_name}.txt")
 
-        # Stream directly to disk to save RAM
+        # STREAM TO DISK: Zero result-list overhead
         with open(txt_path, "w") as f:
             start_time = time.time()
             logger.info(f"▶️ [{s_idx+1}/{num_seqs}] Seq: {sequence_name} | Window: {start_frame}→{end_frame}", only_main=False)
             
             for t, (image, _) in enumerate(loader):
-                # Skip to start of window
-                if t < start_frame:
-                    continue
-                # Break at end of window
-                if t >= end_frame:
-                    break 
+                if t < start_frame: continue
+                if t >= end_frame: break 
                 
                 image.tensors, image.mask = image.tensors.cuda(), image.mask.cuda()
                 tracker.update(image=image)
                 res = tracker.get_track_results()
                 
-                # Apply LongTermMemory re-ID mapping if active
                 if memory and "embeddings" in res and len(res["id"]) > 0:
                     id_map = memory.update(t, res["id"].tolist(), res["embeddings"])
                     new_ids = [id_map.get(rid, rid) for rid in res["id"].tolist()]
                     res["id"] = torch.tensor(new_ids, dtype=torch.int64)
 
-                # Format as MOTChallenge: <frame>, <id>, <x>, <y>, <w>, <h>, <conf>, -1, -1, -1
+                # Format as MOTChallenge for LiteEval & TrackEval
                 for obj_id, bbox in zip(res["id"], res["bbox"]):
                     f.write(f"{t+1},{obj_id.item()},{bbox[0].item()},{bbox[1].item()},{bbox[2].item()},{bbox[3].item()},1,-1,-1,-1\n")
                 
-                # Progress logging every 50 frames
+                # Progress Update every 50 frames
                 processed_count = t + 1 - start_frame
                 if processed_count % 50 == 0:
                     logger.info(f"   ∟ Progress: {processed_count}/{actual_limit} frames...", only_main=False)
                 
-                # Memory Cleanup
                 del res
-                if t % 100 == 0:
+                if t % 100 == 0: 
                     torch.cuda.empty_cache()
             
             fps = processed_count / max(1e-5, (time.time() - start_time))
             logger.success(f"✅ Finished {sequence_name} | FPS: {fps:.1f}", only_main=False)
 
     accelerator.wait_for_everyone()
-    
-    if not is_evaluate:
-        return None
+    if not is_evaluate: return None
 
-    # Final LiteMOT Metric Aggregation
+    # 6. Global Metric Aggregation (LiteEval)
     metrics = Metrics()
     if accelerator.is_main_process:
-        logger.info("📊 LiteEval: Calculating epoch vitals...", only_main=True)
+        logger.info("📊 LiteEval: Calculating global vitals...", only_main=True)
         tracker_dir = os.path.join(outputs_dir, "tracker")
         gt_root = val_config.get("GT_FOLDER") if val_config else os.path.join(data_root, dataset, data_split)
         
         lite_res = lite_mot_eval(tracker_dir, gt_root)
-        
         metrics["MOTA"].update(lite_res["MOTA"])
         metrics["IDF1"].update(lite_res["IDF1"])
-        metrics["HOTA"].update(0.0) # Placeholder for standalone TrackEval audit
+        metrics["HOTA"].update(0.0) 
         
-        logger.success(f"MOTA: {lite_res['MOTA']:.4f} | IDF1: {lite_res['IDF1']:.4f}", only_main=True)
+        logger.success(f"LiteEval Results -> MOTA: {lite_res['MOTA']:.4f} | IDF1: {lite_res['IDF1']:.4f}", only_main=True)
         
     return metrics
 
