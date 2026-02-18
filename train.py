@@ -33,7 +33,7 @@ from utils.nested_tensor import NestedTensor
 from submit_and_evaluate import submit_and_evaluate_one_model
 
 # --- DIAGNOSTIC HELPERS ---
-diag_logs = True
+diag_logs = False
 
 def diag_log(msg: str):
     if diag_logs:

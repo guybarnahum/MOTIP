@@ -11,7 +11,7 @@ import torch.nn as nn
 from utils.misc import is_main_process, is_distributed
 
 # --- DIAGNOSTIC HELPERS ---
-diag_logs = True
+diag_logs = False
 
 def diag_log(msg: str):
     """Bypasses standard logging to flush messages immediately to terminal."""

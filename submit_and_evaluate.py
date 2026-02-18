@@ -22,6 +22,15 @@ try:
 except ImportError:
     LongTermMemory = None
 
+# --- DIAGNOSTIC HELPERS ---
+diag_logs = False
+
+def diag_log(msg: str):
+    """Bypasses standard logging to flush messages immediately to terminal."""
+    if diag_logs:
+        sys.stderr.write(f"🚩 [DIAG] {msg}\n")
+        sys.stderr.flush()
+
 # ------------------------------------------------------------------------
 # LITE EVAL ENGINE: Fast Metrics Calculation
 # ------------------------------------------------------------------------
@@ -138,8 +147,7 @@ def submit_and_evaluate_one_model(
     if image_max_longer <= image_max_shorter:
         image_max_longer = 1333 
         
-    sys.stderr.write(f"\n📊 [EVAL] Frame Limit: {limit_frames} | Resize: {image_max_shorter}x{image_max_longer}\n")
-    sys.stderr.flush()
+    diag_log(f"📊 [EVAL] Frame Limit: {limit_frames} | Resize: {image_max_shorter}x{image_max_longer}")
 
     # 3. Setup Dataset
     inf_ds = dataset_classes[dataset](data_root=data_root, split=data_split, load_annotation=False)
@@ -153,7 +161,7 @@ def submit_and_evaluate_one_model(
     # 🚨 SEQUENCE FILTERING: Trimming happens AFTER shuffle to get a diverse mix
     if limit_seqs is not None and len(all_seq_names) > limit_seqs:
         all_seq_names = all_seq_names[:limit_seqs]
-        sys.stderr.write(f"✂️ [EVAL] Trimming evaluation to first {limit_seqs} sequences for speed.\n")
+        diag_log(f"✂️ [EVAL] Trimming evaluation to first {limit_seqs} sequences for speed.")
 
     # Properly split across DDP processes (if any)
     my_seq_names = [name for i, name in enumerate(all_seq_names) if i % state.num_processes == state.process_index]
@@ -163,8 +171,7 @@ def submit_and_evaluate_one_model(
 
     # 4. Main Streaming Loop
     for s_idx, sequence_name in enumerate(my_seq_names):
-        sys.stderr.write(f"\n▶️ [{s_idx+1}/{num_seqs}] Seq: {sequence_name} (RAM: {psutil.virtual_memory().percent}%)\n")
-        sys.stderr.flush()
+        diag_log(f"▶️ [{s_idx+1}/{num_seqs}] Seq: {sequence_name} (RAM: {psutil.virtual_memory().percent}%)")
 
         seq_ds = SeqDataset(
             inf_ds.sequence_infos[sequence_name], inf_ds.image_paths[sequence_name],
@@ -217,16 +224,14 @@ def submit_and_evaluate_one_model(
                 # Progress heartbeat
                 if frames_processed % 25 == 0:
                     curr_ram = psutil.virtual_memory().percent
-                    sys.stderr.write(f"   ∟ Progress: {frames_processed}/{actual_limit} | RAM: {curr_ram}% | Swap: {psutil.swap_memory().used/(1024**3):.1f}GB\n")
-                    sys.stderr.flush()
+                    diag_log(f"   ∟ Progress: {frames_processed}/{actual_limit} | RAM: {curr_ram}% | Swap: {psutil.swap_memory().used/(1024**3):.1f}GB")
 
                 del res
                 if t % 50 == 0: 
                     torch.cuda.empty_cache()
 
             fps = frames_processed / max(1e-5, (time.time() - start_time))
-            sys.stderr.write(f"✅ Finished {sequence_name} | {fps:.1f} FPS\n")
-            sys.stderr.flush()
+            diag_log(f"✅ Finished {sequence_name} | {fps:.1f} FPS")
 
         # NUCLEAR PURGE per sequence to keep baseline RAM at ~10%
         del loader, seq_ds, tracker, memory
@@ -239,9 +244,7 @@ def submit_and_evaluate_one_model(
     # 5. Global Aggregation
     metrics = Metrics()
     if accelerator.is_main_process:
-        sys.stderr.write("\n📊 [EVAL] Calculating Global MOTA/IDF1...\n")
-        sys.stderr.flush()
-        
+        diag_log("📊 [EVAL] Calculating Global MOTA/IDF1...")
         gt_root = val_config.get("GT_FOLDER") if val_config else os.path.join(data_root, dataset, data_split)
         
         # Ensure lite_mot_eval uses the robust version with np.atleast_2d
