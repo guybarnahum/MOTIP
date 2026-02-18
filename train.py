@@ -7,6 +7,7 @@ import einops
 import gc
 import psutil
 import sys
+
 from accelerate import Accelerator
 from accelerate.state import PartialState
 from torch.utils.data import DataLoader
@@ -205,15 +206,20 @@ def train_engine(config: dict):
         )
 
         # --- TRANSITION PURGE ---
-        # Reclaim memory before construction of the summary and checkpoint
-        optimizer.zero_grad(set_to_none=True) 
-        gc.collect()
-        torch.cuda.empty_cache()
+        sys.stderr.write("🚩 [DIAG] Back in train_engine. Syncing metrics...\n")
+        sys.stderr.flush()
 
-        # Get learning rate:
+        # 1. Get learning rate & Sync
         lr = optimizer.state_dict()["param_groups"][-1]["lr"]
         train_metrics["lr"].update(lr)
+        
+        sys.stderr.write("🚩 [DIAG] Calling train_metrics.sync()...\n")
+        sys.stderr.flush()
         train_metrics["lr"].sync()
+        
+        sys.stderr.write("🚩 [DIAG] Sync complete. Building dashboard log...\n")
+        sys.stderr.flush()
+
         time_per_epoch = TPS.format(TPS.timestamp() - epoch_start_timestamp)
         
         # --- ENHANCED LOGGING FOR DASHBOARD ---
@@ -242,6 +248,9 @@ def train_engine(config: dict):
                 x_axis_step=epoch,
                 x_axis_name="epoch",
             )
+
+            sys.stderr.write(f"🚩 [DIAG] Dashboard log built. RAM: {psutil.virtual_memory().percent}%\n")
+            sys.stderr.flush()
         # --------------------------------------
 
         # --- VISIBILITY: LOG RAM BEFORE SAVING ---
@@ -635,13 +644,25 @@ def train_one_epoch(
             
             # 4. Skip to next batch
             continue
+    
+    # DIAG
+    sys.stderr.write("\n🚩 [DIAG] Step loop finished. Entering cleanup...\n")
+    sys.stderr.flush()
 
-    # 🚨 PRE-RETURN PURGE: Reclaim memory before construction of the summary in engine
-    optimizer.zero_grad(set_to_none=True) 
-    gc.collect() 
+    # 1. Zero Grad
+    optimizer.zero_grad(set_to_none=True)
+    sys.stderr.write("🚩 [DIAG] Gradients cleared.\n")
+    sys.stderr.flush()
+
+    # 2. GC
+    gc.collect()
     torch.cuda.empty_cache()
+    sys.stderr.write(f"🚩 [DIAG] GC complete. RAM Usage: {psutil.virtual_memory().percent}%\n")
+    sys.stderr.flush()
 
     states["start_epoch"] += 1
+    sys.stderr.write("🚩 [DIAG] Returning metrics to engine.\n")
+    sys.stderr.flush()
     return metrics
 
 
