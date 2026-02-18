@@ -32,6 +32,43 @@ from models.misc import get_model
 from utils.nested_tensor import NestedTensor
 from submit_and_evaluate import submit_and_evaluate_one_model
 
+# --- DIAGNOSTIC HELPERS ---
+diag_logs = True
+
+def diag_log(msg: str):
+    if diag_logs:
+        sys.stderr.write(f"🚩 [DIAG] {msg}\n")
+        sys.stderr.flush()
+
+def extract_metrics_safely(train_metrics: Metrics):
+    """Extracts values as raw floats to break tensor graph links before purging."""
+    diag_log("Extracting metric values as floats...")
+    def _safe_get(key):
+        try:
+            return float(train_metrics[key].global_average)
+        except:
+            return 0.0
+    
+    extracted = {
+        "loss": _safe_get('loss'),
+        "detr_loss": _safe_get('detr_loss'),
+        "id_loss": _safe_get('id_loss'),
+        "class_error": _safe_get('class_error'),
+        "detr_grad_norm": _safe_get('detr_grad_norm')
+    }
+    diag_log(f"Extracted Loss={extracted['loss']:.4f}. Current RAM: {psutil.virtual_memory().percent}%")
+    return extracted
+
+def transition_purge(optimizer=None):
+    """Aggressively clears transient memory buffers."""
+    diag_log("Starting transition purge...")
+    if optimizer is not None:
+        optimizer.zero_grad(set_to_none=True)
+    gc.collect()
+    torch.cuda.empty_cache()
+    diag_log(f"Purge complete. RAM Usage: {psutil.virtual_memory().percent}%")
+
+# --------------------------
 
 def train_engine(config: dict):
     # Init some settings:
@@ -205,74 +242,35 @@ def train_engine(config: dict):
             id_vocabulary=config.get("NUM_ID_VOCABULARY",None)
         )
 
-        # --- TRANSITION PURGE ---
-        sys.stderr.write("🚩 [DIAG] Back in train_engine. Syncing metrics...\n")
-        sys.stderr.flush()
-
-        # 1. Get learning rate & Sync
-        lr = optimizer.state_dict()["param_groups"][-1]["lr"]
+        diag_log("Back in train_engine. Syncing metrics...")
+        
+        # 1. Get learning rate & Sync (Direct access avoids full state_dict copy)
+        lr = optimizer.param_groups[-1]["lr"]
         train_metrics["lr"].update(lr)
         
-        sys.stderr.write("🚩 [DIAG] Calling train_metrics.sync()...\n")
-        sys.stderr.flush()
+        diag_log("Calling train_metrics.sync()...")
         train_metrics["lr"].sync()
-        
-        sys.stderr.write("🚩 [DIAG] Sync complete. Building dashboard log...\n")
-        sys.stderr.flush()
+        diag_log("Sync complete. Starting Safe Extraction...")
 
-        # --- SAFE METRIC EXTRACTION ---
-        sys.stderr.write("🚩 [DIAG] Sync complete. Extracting values as floats...\n")
-        sys.stderr.flush()
-
-        # Extract values as raw floats immediately to break tensor/graph links
-        try:
-            m_loss = float(train_metrics['loss'].global_average)
-            m_detr = float(train_metrics['detr_loss'].global_average)
-            m_id   = float(train_metrics['id_loss'].global_average)
-            m_err  = float(train_metrics['class_error'].global_average) if 'class_error' in train_metrics else 0.0
-            m_grad = float(train_metrics['detr_grad_norm'].global_average) if 'detr_grad_norm' in train_metrics else 0.0
-        except Exception as e:
-            sys.stderr.write(f"🚩 [DIAG] Error during float conversion: {str(e)}\n")
-            m_loss = m_detr = m_id = m_err = m_grad = 0.0
-
-        sys.stderr.write(f"🚩 [DIAG] Values extracted: Loss={m_loss:.4f}. Purging metrics object...\n")
-        sys.stderr.flush()
-        
-        # Now that we have the floats, we can kill the heavy metrics object
+        # 2. Extract values as floats and PURGE Metrics immediately
+        # This prevents the hang during dashboard string building
+        m = extract_metrics_safely(train_metrics)
         del train_metrics
-        gc.collect()
+        transition_purge(optimizer=optimizer)
 
         time_per_epoch = TPS.format(TPS.timestamp() - epoch_start_timestamp)
 
         # --- ENHANCED LOGGING FOR DASHBOARD ---
         if accelerator.is_main_process:
-            # We use the raw floats (m_loss, etc.) instead of accessing the object again
             dashboard_log = (
                 f"[Finish epoch: {epoch}] [Time: {time_per_epoch}] "
-                f"loss = {m_loss:.4f}; detr_loss = {m_detr:.4f}; "
-                f"id_loss = {m_id:.4f}; class_error = {m_err:.4f}; "
-                f"detr_grad_norm = {m_grad:.4f};"
+                f"loss = {m['loss']:.4f}; detr_loss = {m['detr_loss']:.4f}; "
+                f"id_loss = {m['id_loss']:.4f}; class_error = {m['class_error']:.4f}; "
+                f"detr_grad_norm = {m['detr_grad_norm']:.4f};"
             )
             logger.info(dashboard_log)
-            
-            sys.stderr.write(f"🚩 [DIAG] Dashboard log printed. RAM: {psutil.virtual_memory().percent}%\n")
-            sys.stderr.flush()
-            
-            # 2. This one is for WandB / Structured Logging (Original Logic)
-            logger.metrics(
-                log=f"[Finish epoch: {epoch}] [Time: {time_per_epoch}] ",
-                metrics=train_metrics,
-                fmt="{global_average:.4f}",
-                statistic="global_average",
-                global_step=train_states["global_step"],
-                prefix="epoch",
-                x_axis_step=epoch,
-                x_axis_name="epoch",
-            )
+            diag_log("Dashboard log printed.")
 
-            sys.stderr.write(f"🚩 [DIAG] Dashboard log printed. RAM: {psutil.virtual_memory().percent}%\n")
-            sys.stderr.flush()
-            
         # --------------------------------------
 
         # --- VISIBILITY: LOG RAM BEFORE SAVING ---
@@ -281,20 +279,19 @@ def train_engine(config: dict):
 
         # Save checkpoint:
         if (epoch + 1) % config["SAVE_CHECKPOINT_PER_EPOCH"] == 0:
+            diag_log(f"Entering save_checkpoint. RAM: {psutil.virtual_memory().percent}%")
             save_checkpoint(
                 model=model,
                 path=os.path.join(outputs_dir, f"checkpoint_{epoch}.pth"),
                 states=train_states,
                 optimizer=optimizer,
                 scheduler=scheduler,
-                only_detr=only_detr,
-                # logger=logger  # Assuming updated save_checkpoint accepts logger for internal visibility
+                only_detr=only_detr
             )
-
-            # Recovery Visibility
-            gc.collect()
-            mem_after = psutil.virtual_memory().percent
-            logger.info(f"✅ [TRANSITION] Checkpoint Saved & RAM Purged. Current RAM: {mem_after}%")
+            
+            # Post-Save Clean
+            transition_purge()
+            logger.info(f"✅ [TRANSITION] Checkpoint Saved & RAM Purged. Current RAM: {psutil.virtual_memory().percent}%")
 
             if config["INFERENCE_DATASET"] is not None:
                 assert config["INFERENCE_SPLIT"] is not None, f"Please set the INFERENCE_SPLIT for inference."
@@ -559,15 +556,15 @@ def train_one_epoch(
                     optimizer.zero_grad()
                     continue
 
-                # Logging losses:
-                metrics.update(name="loss", value=loss.item())
-                metrics.update(name="detr_loss", value=detr_loss.item())
+                # Logging losses: Use float() to break the tensor graph immediately
+                metrics.update(name="loss", value=float(loss.item()))
+                metrics.update(name="detr_loss", value=float(detr_loss.item()))
                 if id_loss is not None:
-                    metrics.update(name="id_loss", value=id_loss.item())
+                    metrics.update(name="id_loss", value=float(id_loss.item()))
                 if "class_error" in detr_loss_dict:
-                    metrics.update(name="class_error", value=detr_loss_dict["class_error"].item())
+                    metrics.update(name="class_error", value=float(detr_loss_dict["class_error"].item()))
                 for k, v in detr_loss_dict.items():
-                    metrics.update(name=k, value=v.item())
+                    metrics.update(name=k, value=float(v.item()))
                 
                 loss /= accumulate_steps
                 accelerator.backward(loss) 
@@ -593,8 +590,8 @@ def train_one_epoch(
                         optimizer.zero_grad()
                     else:
                         # Hack implementation to log grad_norm
-                        metrics.update(name="detr_grad_norm", value=detr_grad_norm.item())
-                        metrics.update(name="other_grad_norm", value=other_grad_norm.item())
+                        metrics.update(name="detr_grad_norm", value=float(detr_grad_norm.item()))
+                        metrics.update(name="other_grad_norm", value=float(other_grad_norm.item()))
                         
                         optimizer.step()
                         optimizer.zero_grad()
@@ -606,7 +603,7 @@ def train_one_epoch(
             if step % logging_interval == 0:
                 # logger.info(f"[Epoch: {epoch}] [{step}/{total_steps}] [tps: {tps.average:.2f}s]")
                 # Get learning rate for current step:
-                _lr = optimizer.state_dict()["param_groups"][-1]["lr"]
+                _lr = optimizer.param_groups[-1]["lr"]
                 # Get the GPU memory usage:
                 torch.cuda.synchronize()
                 _cuda_memory = torch.cuda.max_memory_allocated(device) / 1024 / 1024
@@ -666,25 +663,16 @@ def train_one_epoch(
             
             # 4. Skip to next batch
             continue
-    
+
     # DIAG
-    sys.stderr.write("\n🚩 [DIAG] Step loop finished. Entering cleanup...\n")
-    sys.stderr.flush()
-
-    # 1. Zero Grad
-    optimizer.zero_grad(set_to_none=True)
-    sys.stderr.write("🚩 [DIAG] Gradients cleared.\n")
-    sys.stderr.flush()
-
-    # 2. GC
-    gc.collect()
-    torch.cuda.empty_cache()
-    sys.stderr.write(f"🚩 [DIAG] GC complete. RAM Usage: {psutil.virtual_memory().percent}%\n")
-    sys.stderr.flush()
+    diag_log(f"Step loop finished. Entering cleanup. RAM: {psutil.virtual_memory().percent}%")
+    
+    # 🚨 EXIT PURGE: Ensure the return to engine is memory-neutral
+    transition_purge(optimizer=optimizer)
+    del detr_params, other_params, model_without_ddp
 
     states["start_epoch"] += 1
-    sys.stderr.write("🚩 [DIAG] Returning metrics to engine.\n")
-    sys.stderr.flush()
+    diag_log("Returning metrics to engine.")
     return metrics
 
 

@@ -3,8 +3,6 @@ import sys
 import gc
 import psutil
 import torch
-
-import torch
 import torchvision
 import copy
 import math
@@ -12,6 +10,16 @@ import torch.nn as nn
 
 from utils.misc import is_main_process, is_distributed
 
+# --- DIAGNOSTIC HELPERS ---
+diag_logs = True
+
+def diag_log(msg: str):
+    """Bypasses standard logging to flush messages immediately to terminal."""
+    if diag_logs:
+        sys.stderr.write(f"🚩 [DIAG] {msg}\n")
+        sys.stderr.flush()
+
+# --------------------------
 
 # Several calculation functions that are used in multiple model structures:
 
@@ -34,12 +42,6 @@ def inverse_sigmoid(x, eps=1e-5):
     """
     if      x = 1/(1+exp(-y))
     then    y = ln(x/(1-x))
-    Args:
-        x:
-        eps:
-
-    Returns:
-
     """
     x = x.clamp(min=0, max=1)
     x1 = x.clamp(min=eps)
@@ -48,24 +50,6 @@ def inverse_sigmoid(x, eps=1e-5):
 
 
 def interpolate(input, size=None, scale_factor=None, mode="nearest", align_corners=None):
-    # type: (Tensor, Optional[List[int]], Optional[float], str, Optional[bool]) -> Tensor
-    """
-    Equivalent to nn.functional.interpolate, but with support for empty batch sizes.
-    This will eventually be supported natively by PyTorch, and this
-    class can go away.
-    """
-    # if float(torchvision.__version__[:3]) < 0.7:
-    #     if input.numel() > 0:
-    #         return torch.nn.functional.interpolate(
-    #             input, size, scale_factor, mode, align_corners
-    #         )
-    #
-    #     output_shape = _output_size(2, input, size, scale_factor)
-    #     output_shape = list(input.shape[:-2]) + list(output_shape)
-    #     if float(torchvision.__version__[:3]) < 0.5:
-    #         return _NewEmptyTensorOp.apply(input, output_shape)
-    #     return _new_empty_tensor(input, output_shape)
-    # else:
     return torchvision.ops.misc.interpolate(input, size, scale_factor, mode, align_corners)
 
 
@@ -95,13 +79,10 @@ def load_detr_pretrain(model: nn.Module, pretrain_path: str, num_classes: int | 
     detr_state_dict = dict()
     model_state_dict = model.state_dict()
     
-    # --- 1. Robust Prefix Handling (Fixes the KeyError) ---
-    # Check if the local model uses 'detr.' prefix
+    # --- 1. Robust Prefix Handling ---
     has_detr_prefix = any(k.startswith("detr.") for k in model_state_dict.keys())
 
     for k, v in pretrain_state_dict.items():
-        # If model wants 'detr.' but checkpoint doesn't have it, add it.
-        # If checkpoint already has it, leave it alone.
         if has_detr_prefix and not k.startswith("detr."):
             new_key = "detr." + k
         else:
@@ -114,7 +95,6 @@ def load_detr_pretrain(model: nn.Module, pretrain_path: str, num_classes: int | 
             if num_classes is None:
                 num_classes = len(detr_state_dict[k])
             
-            # Case A: COCO (91 classes)
             if len(detr_state_dict[k]) == 91:   
                 if num_classes == 1:
                     if default_class_idx is None:   
@@ -126,11 +106,9 @@ def load_detr_pretrain(model: nn.Module, pretrain_path: str, num_classes: int | 
                     if k in model_state_dict:
                         detr_state_dict[k] = model_state_dict[k]
                     
-            # Case B: Perfect Match
             elif num_classes == len(detr_state_dict[k]):    
                 pass
             
-            # Case C: Mismatch (DanceTrack 1 -> BDD 2)
             else:
                 print(f"⚠️  WARNING: Pretrain classes ({len(detr_state_dict[k])}) != Model classes ({num_classes}). Resetting {k}.")
                 if k in model_state_dict:
@@ -138,7 +116,6 @@ def load_detr_pretrain(model: nn.Module, pretrain_path: str, num_classes: int | 
                 else:
                     print(f"   ❌ Could not find {k} in model to reset it. Skipping.")
 
-        # Handle DINO label_enc Mismatch
         if "label_enc" in k:
             if k in model_state_dict and len(detr_state_dict[k]) != len(model_state_dict[k]):
                 if len(model_state_dict[k]) == 2:
@@ -150,55 +127,54 @@ def load_detr_pretrain(model: nn.Module, pretrain_path: str, num_classes: int | 
                     detr_state_dict[k] = model_state_dict[k]
 
     # --- 3. Final Load ---
-    # Filter out keys that don't exist in the model (just in case)
     final_state_dict = {}
     for k, v in detr_state_dict.items():
         if k in model_state_dict:
-            # Final shape check to prevent crashing
             if v.shape != model_state_dict[k].shape:
-                print(f"⚠️  Final shape mismatch for {k}: {v.shape} vs {model_state_dict[k].shape}. Resetting to random.")
+                print(f"⚠️  Final shape mismatch for {k}: {v.shape} vs {model_state_dict[k].shape}. Resetting.")
                 final_state_dict[k] = model_state_dict[k]
             else:
                 final_state_dict[k] = v
         
     model.load_state_dict(state_dict=final_state_dict, strict=False)
+    # Clear large pretrain dict from RAM
+    del pretrain_model, pretrain_state_dict, detr_state_dict
+    gc.collect()
     return
 
 
 def save_checkpoint(model, path, states: dict, optimizer, scheduler, only_detr: bool = False):
-    sys.stderr.write(f"\n💾 [DIAG] Entering save_checkpoint. Target: {path}\n")
-    sys.stderr.flush()
+    """Memory-safe checkpointing to avoid RAM/Swap explosion."""
+    diag_log(f"Entering save_checkpoint. Target: {path}")
 
     if is_main_process():
         model_obj = get_model(model)
         if only_detr: model_obj = model_obj.detr
 
-        sys.stderr.write("💾 [DIAG] Building state dict copy...\n")
-        sys.stderr.flush()
+        diag_log("Extracting model.state_dict()...")
+        m_state = model_obj.state_dict()
+
+        # Optimizer state_dict is the main RAM spike point
+        diag_log("Extracting optimizer.state_dict() [Potential Spike Point]...")
+        o_state = optimizer.state_dict() if optimizer is not None else None
         
-        # Creating this dict is the #1 RAM spike in PyTorch
+        diag_log("Assembling save_state dictionary...")
         save_state = {
-            "model": model_obj.state_dict(),
-            "optimizer": optimizer.state_dict() if optimizer is not None else None,
+            "model": m_state,
+            "optimizer": o_state,
             "scheduler": scheduler.state_dict() if scheduler is not None else None,
             "states": states,
         }
         
-        sys.stderr.write(f"💾 [DIAG] Save dict ready. RAM: {psutil.virtual_memory().percent}%. Writing...\n")
-        sys.stderr.flush()
-
+        diag_log(f"Save dict assembled. RAM Usage: {psutil.virtual_memory().percent}%. Starting torch.save...")
         torch.save(save_state, path)
         
-        sys.stderr.write("💾 [DIAG] torch.save finished. PURGING RAM...\n")
-        sys.stderr.flush()
-
-        del save_state
+        diag_log("torch.save finished. PURGING intermediate CPU dictionaries...")
+        # Clear specific references to the large CPU-side copies
+        del save_state, m_state, o_state
         gc.collect()
         
-        sys.stderr.write(f"💾 [DIAG] RAM recovered to: {psutil.virtual_memory().percent}%\n")
-        sys.stderr.flush()
-
-        
+        diag_log(f"Checkpoint complete. RAM recovered to: {psutil.virtual_memory().percent}%")
 
 def load_checkpoint(model, path, states=None, optimizer=None, scheduler=None):
     load_state = torch.load(path, map_location=lambda storage, loc: storage, weights_only=False)
@@ -216,6 +192,10 @@ def load_checkpoint(model, path, states=None, optimizer=None, scheduler=None):
         scheduler.load_state_dict(load_state["scheduler"])
     if states is not None:
         states.update(load_state["states"])
+    
+    # Clean up load dictionary
+    del load_state, model_state
+    gc.collect()
     return
 
 
@@ -229,7 +209,7 @@ def get_model(model):
 # For previous version of MOTIP models:
 def load_previous_checkpoint(model, path, states=None, optimizer=None, scheduler=None):
     assert states is None and optimizer is None and scheduler is None, \
-        "The states, optimizer, and scheduler should be None for the previous version of MOTIP models."
+        "The states, optimizer, and scheduler should be None for previous versions."
 
     load_state = torch.load(path, map_location=lambda storage, loc: storage)
     model_state = load_state["model"]
@@ -259,8 +239,6 @@ def load_previous_checkpoint(model, path, states=None, optimizer=None, scheduler
                     for _ in range(0, 6):
                         _transfer_k = transfer_k
                         _transfer_k = _transfer_k.replace("embed_to_word", f"embed_to_word_layers.{_}")
-                        if _transfer_k in transfer_states:
-                            print(f"Key '{_transfer_k}' is already in the transfer states.")
                         transfer_states[_transfer_k] = v
                     continue
                 elif "decoder_layers" in transfer_k:
@@ -275,15 +253,7 @@ def load_previous_checkpoint(model, path, states=None, optimizer=None, scheduler
                     if "norm" in transfer_k:
                         transfer_k = transfer_k.replace("ffn_layers", "ffn_norm_layers")
                         transfer_k = transfer_k.replace("norm.", "")
-                        pass
-                else:
-                    pass
-                if transfer_k in transfer_states:
-                    print(f"Key '{transfer_k}' is already in the transfer states.")
                 transfer_states[transfer_k] = v
-                pass
-            else:
-                pass
         model.load_state_dict(transfer_states)
 
     if optimizer is not None:
@@ -292,4 +262,7 @@ def load_previous_checkpoint(model, path, states=None, optimizer=None, scheduler
         scheduler.load_state_dict(load_state["scheduler"])
     if states is not None:
         states.update(load_state["states"])
+    
+    del load_state, model_state, transfer_states
+    gc.collect()
     return
