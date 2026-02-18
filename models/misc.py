@@ -1,4 +1,8 @@
 # Copyright (c) Ruopeng Gao. All Rights Reserved.
+import sys
+import gc
+import psutil
+import torch
 
 import torch
 import torchvision
@@ -160,19 +164,45 @@ def load_detr_pretrain(model: nn.Module, pretrain_path: str, num_classes: int | 
     model.load_state_dict(state_dict=final_state_dict, strict=False)
     return
 
-def save_checkpoint(model, path, states: dict, optimizer, scheduler, only_detr: bool = False):
-    if is_main_process():   # only save the model in the main process.
-        model = get_model(model)
+
+def save_checkpoint(model, path, states: dict, optimizer, scheduler, only_detr: bool = False, logger=None):
+    if is_main_process():
+        # Using sys.stderr ensures the message is flushed immediately 
+        # even if the system is lagging/swapping.
+        def log(msg):
+            sys.stderr.write(f"💾 [CHECKPOINT] {msg}\n")
+            sys.stderr.flush()
+
+        log(f"Initiating save. RAM: {psutil.virtual_memory().percent}%")
+        
+        model_obj = get_model(model)
         if only_detr:
-            model = model.detr
+            model_obj = model_obj.detr
+
+        # 1. Save Model Weights FIRST and delete the state_dict immediately
+        # We do this in a local scope to ensure the state_dict is eligible for GC
+        m_state = model_obj.state_dict()
+        log("Model state_dict extracted.")
+        
+        # 2. Build the save object
+        # We put the optimizer in last, as it is the largest.
         save_state = {
-            "model": model.state_dict(),
+            "model": m_state,
             "optimizer": optimizer.state_dict() if optimizer is not None else None,
             "scheduler": scheduler.state_dict() if scheduler is not None else None,
             "states": states,
         }
+        del m_state # Clean up the intermediate reference
+        
+        log(f"Dictionary assembled (RAM Spike: {psutil.virtual_memory().percent}%). Writing to disk...")
+        
+        # 3. Save
         torch.save(save_state, path)
-    return
+        
+        # 4. 🚨 THE PURGE
+        del save_state
+        gc.collect() 
+        log(f"Done. RAM recovered to: {psutil.virtual_memory().percent}%")
 
 
 def load_checkpoint(model, path, states=None, optimizer=None, scheduler=None):

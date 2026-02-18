@@ -4,6 +4,9 @@ import os
 import math
 import torch
 import einops
+import gc
+import psutil
+import sys
 from accelerate import Accelerator
 from accelerate.state import PartialState
 from torch.utils.data import DataLoader
@@ -201,6 +204,12 @@ def train_engine(config: dict):
             id_vocabulary=config.get("NUM_ID_VOCABULARY",None)
         )
 
+        # --- TRANSITION PURGE ---
+        # Reclaim memory before construction of the summary and checkpoint
+        optimizer.zero_grad(set_to_none=True) 
+        gc.collect()
+        torch.cuda.empty_cache()
+
         # Get learning rate:
         lr = optimizer.state_dict()["param_groups"][-1]["lr"]
         train_metrics["lr"].update(lr)
@@ -235,6 +244,10 @@ def train_engine(config: dict):
             )
         # --------------------------------------
 
+        # --- VISIBILITY: LOG RAM BEFORE SAVING ---
+        mem = psutil.virtual_memory()
+        logger.info(f"💾 [TRANSITION] Preparing Checkpoint. System RAM: {mem.percent}% ({mem.used/1e9:.1f}GB / {mem.total/1e9:.1f}GB)")
+
         # Save checkpoint:
         if (epoch + 1) % config["SAVE_CHECKPOINT_PER_EPOCH"] == 0:
             save_checkpoint(
@@ -244,7 +257,14 @@ def train_engine(config: dict):
                 optimizer=optimizer,
                 scheduler=scheduler,
                 only_detr=only_detr,
+                # logger=logger  # Assuming updated save_checkpoint accepts logger for internal visibility
             )
+
+            # Recovery Visibility
+            gc.collect()
+            mem_after = psutil.virtual_memory().percent
+            logger.info(f"✅ [TRANSITION] Checkpoint Saved & RAM Purged. Current RAM: {mem_after}%")
+
             if config["INFERENCE_DATASET"] is not None:
                 assert config["INFERENCE_SPLIT"] is not None, f"Please set the INFERENCE_SPLIT for inference."
                 eval_metrics = submit_and_evaluate_one_model(
@@ -615,6 +635,11 @@ def train_one_epoch(
             
             # 4. Skip to next batch
             continue
+
+    # 🚨 PRE-RETURN PURGE: Reclaim memory before construction of the summary in engine
+    optimizer.zero_grad(set_to_none=True) 
+    gc.collect() 
+    torch.cuda.empty_cache()
 
     states["start_epoch"] += 1
     return metrics
