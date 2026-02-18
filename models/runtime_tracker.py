@@ -192,42 +192,52 @@ class RuntimeTracker:
             return self.num_id_vocabulary * torch.ones(boxes.shape[0], dtype=torch.int64, device=boxes.device)
         else:
             # 1. prepare current infos:
-            current_features = output_embeds[None, ...]     # (T, N, ...)
+            # Note: T=1 for current frame "unknowns"
+            current_features = output_embeds[None, ...]     # (T, N, C)
             current_boxes = boxes[None, ...]                # (T, N, 4)
             current_masks = torch.zeros((1, output_embeds.shape[0]), dtype=torch.bool, device=distributed_device())
             current_times = self.trajectory_times.shape[0] * torch.ones(
                 (1, output_embeds.shape[0]), dtype=torch.int64, device=distributed_device(),
             )
+            
             # 2. prepare seq_info:
+            # We must ensure categories matches the 4D expectation of the IDDecoder (B, G, T, N)
             seq_info = {
-                "trajectory_features": self.trajectory_features[None, None, ...],
-                "trajectory_boxes": self.trajectory_boxes[None, None, ...],
-                "trajectory_id_labels": self.trajectory_id_labels[None, None, ...],
-                "trajectory_class_labels": self.trajectory_category_labels[None, None, ...],
-                "trajectory_times": self.trajectory_times[None, None, ...],
-                "trajectory_masks": self.trajectory_masks[None, None, ...],
-                "unknown_features": current_features[None, None, ...],
-                "unknown_boxes": current_boxes[None, None, ...],
-                "unknown_class_labels": categories[None, None, ...],
-                "unknown_masks": current_masks[None, None, ...],
-                "unknown_times": current_times[None, None, ...],
+                "trajectory_features": self.trajectory_features[None, None, ...],    # (B, G, T, N, C)
+                "trajectory_boxes": self.trajectory_boxes[None, None, ...],          # (B, G, T, N, 4)
+                "trajectory_id_labels": self.trajectory_id_labels[None, None, ...],    # (B, G, T, N)
+                "trajectory_class_labels": self.trajectory_category_labels[None, None, ...], # (B, G, T, N)
+                "trajectory_times": self.trajectory_times[None, None, ...],          # (B, G, T, N)
+                "trajectory_masks": self.trajectory_masks[None, None, ...],          # (B, G, T, N)
+                
+                "unknown_features": current_features[None, None, ...],               # (B, G, T, N, C)
+                "unknown_boxes": current_boxes[None, None, ...],                     # (B, G, T, N, 4)
+                
+                # --- FIX: Ensure 4D shape (1, 1, 1, N) for Multi-Class Gating ---
+                "unknown_class_labels": categories[None, None, None, ...], 
+                # -----------------------------------------------------------------
+                
+                "unknown_masks": current_masks[None, None, ...],                     # (B, G, T, N)
+                "unknown_times": current_times[None, None, ...],                     # (B, G, T, N)
             }
+            
             # 3. forward:
             seq_info = self.model(seq_info=seq_info, part="trajectory_modeling")
             id_logits, _, _ = self.model(seq_info=seq_info, part="id_decoder")
+            
             # 4. get scores:
+            # id_logits shape is (B, G, T, N, Vocabulary) -> (1, 1, 1, N, Vocab)
             id_logits = id_logits[0, 0, 0]
             if not self.use_sigmoid:
                 id_scores = id_logits.softmax(dim=-1)
             else:
                 id_scores = id_logits.sigmoid()
+                
             # 5. assign id labels:
-            # Different assignment protocols:
             match self.assignment_protocol:
                 case "hungarian": id_labels = self._hungarian_assignment(id_scores=id_scores)
                 case "object-max": id_labels = self._object_max_assignment(id_scores=id_scores)
                 case "id-max": id_labels = self._id_max_assignment(id_scores=id_scores)
-                # case "object-priority": id_labels = self._object_priority_assignment(id_scores=id_scores)
                 case _: raise NotImplementedError
 
             id_pred_labels = torch.tensor(id_labels, dtype=torch.int64, device=distributed_device())
