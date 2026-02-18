@@ -220,22 +220,43 @@ def train_engine(config: dict):
         sys.stderr.write("🚩 [DIAG] Sync complete. Building dashboard log...\n")
         sys.stderr.flush()
 
-        time_per_epoch = TPS.format(TPS.timestamp() - epoch_start_timestamp)
+        # --- SAFE METRIC EXTRACTION ---
+        sys.stderr.write("🚩 [DIAG] Sync complete. Extracting values as floats...\n")
+        sys.stderr.flush()
+
+        # Extract values as raw floats immediately to break tensor/graph links
+        try:
+            m_loss = float(train_metrics['loss'].global_average)
+            m_detr = float(train_metrics['detr_loss'].global_average)
+            m_id   = float(train_metrics['id_loss'].global_average)
+            m_err  = float(train_metrics['class_error'].global_average) if 'class_error' in train_metrics else 0.0
+            m_grad = float(train_metrics['detr_grad_norm'].global_average) if 'detr_grad_norm' in train_metrics else 0.0
+        except Exception as e:
+            sys.stderr.write(f"🚩 [DIAG] Error during float conversion: {str(e)}\n")
+            m_loss = m_detr = m_id = m_err = m_grad = 0.0
+
+        sys.stderr.write(f"🚩 [DIAG] Values extracted: Loss={m_loss:.4f}. Purging metrics object...\n")
+        sys.stderr.flush()
         
+        # Now that we have the floats, we can kill the heavy metrics object
+        del train_metrics
+        gc.collect()
+
+        time_per_epoch = TPS.format(TPS.timestamp() - epoch_start_timestamp)
+
         # --- ENHANCED LOGGING FOR DASHBOARD ---
         if accelerator.is_main_process:
-            class_error = train_metrics["class_error"].global_average if "class_error" in train_metrics else 0.0
-            
-            # 1. This one is for your plot_dashboard.py script (Clean string in train.log)
+            # We use the raw floats (m_loss, etc.) instead of accessing the object again
             dashboard_log = (
                 f"[Finish epoch: {epoch}] [Time: {time_per_epoch}] "
-                f"loss = {train_metrics['loss'].global_average:.4f}; "
-                f"detr_loss = {train_metrics['detr_loss'].global_average:.4f}; "
-                f"id_loss = {train_metrics['id_loss'].global_average:.4f}; "
-                f"class_error = {class_error:.4f}; "
-                f"detr_grad_norm = {train_metrics['detr_grad_norm'].global_average:.4f};"
+                f"loss = {m_loss:.4f}; detr_loss = {m_detr:.4f}; "
+                f"id_loss = {m_id:.4f}; class_error = {m_err:.4f}; "
+                f"detr_grad_norm = {m_grad:.4f};"
             )
             logger.info(dashboard_log)
+            
+            sys.stderr.write(f"🚩 [DIAG] Dashboard log printed. RAM: {psutil.virtual_memory().percent}%\n")
+            sys.stderr.flush()
             
             # 2. This one is for WandB / Structured Logging (Original Logic)
             logger.metrics(
@@ -249,8 +270,9 @@ def train_engine(config: dict):
                 x_axis_name="epoch",
             )
 
-            sys.stderr.write(f"🚩 [DIAG] Dashboard log built. RAM: {psutil.virtual_memory().percent}%\n")
+            sys.stderr.write(f"🚩 [DIAG] Dashboard log printed. RAM: {psutil.virtual_memory().percent}%\n")
             sys.stderr.flush()
+            
         # --------------------------------------
 
         # --- VISIBILITY: LOG RAM BEFORE SAVING ---

@@ -166,45 +166,39 @@ def load_detr_pretrain(model: nn.Module, pretrain_path: str, num_classes: int | 
 
 
 def save_checkpoint(model, path, states: dict, optimizer, scheduler, only_detr: bool = False):
-    sys.stderr.write(f"\n💾 [DIAG] Entering save_checkpoint to: {path}\n")
+    sys.stderr.write(f"\n💾 [DIAG] Entering save_checkpoint. Target: {path}\n")
     sys.stderr.flush()
 
     if is_main_process():
         model_obj = get_model(model)
-        if only_detr:
-            model_obj = model_obj.detr
+        if only_detr: model_obj = model_obj.detr
 
-        sys.stderr.write("💾 [DIAG] Extracting model.state_dict()...\n")
+        sys.stderr.write("💾 [DIAG] Building state dict copy...\n")
         sys.stderr.flush()
-        m_state = model_obj.state_dict()
-
-        sys.stderr.write("💾 [DIAG] Extracting optimizer.state_dict()...\n")
-        sys.stderr.flush()
-        # This is the most likely spike point
-        o_state = optimizer.state_dict() if optimizer is not None else None
-
-        sys.stderr.write("💾 [DIAG] Assembling save_state dictionary...\n")
-        sys.stderr.flush()
+        
+        # Creating this dict is the #1 RAM spike in PyTorch
         save_state = {
-            "model": m_state,
-            "optimizer": o_state,
+            "model": model_obj.state_dict(),
+            "optimizer": optimizer.state_dict() if optimizer is not None else None,
             "scheduler": scheduler.state_dict() if scheduler is not None else None,
             "states": states,
         }
-
-        sys.stderr.write(f"💾 [DIAG] Dictionary ready. Size of Save: {sys.getsizeof(save_state)/1e6:.1f} MB (Logical)\n")
-        sys.stderr.write(f"💾 [DIAG] Current RAM: {psutil.virtual_memory().percent}%. Starting torch.save...\n")
+        
+        sys.stderr.write(f"💾 [DIAG] Save dict ready. RAM: {psutil.virtual_memory().percent}%. Writing...\n")
         sys.stderr.flush()
 
         torch.save(save_state, path)
         
-        sys.stderr.write("💾 [DIAG] torch.save finished. Purging...\n")
+        sys.stderr.write("💾 [DIAG] torch.save finished. PURGING RAM...\n")
         sys.stderr.flush()
 
-        del save_state, m_state, o_state
+        del save_state
         gc.collect()
-        sys.stderr.write(f"💾 [DIAG] Save sequence complete. RAM recovered to: {psutil.virtual_memory().percent}%\n")
+        
+        sys.stderr.write(f"💾 [DIAG] RAM recovered to: {psutil.virtual_memory().percent}%\n")
         sys.stderr.flush()
+
+        
 
 def load_checkpoint(model, path, states=None, optimizer=None, scheduler=None):
     load_state = torch.load(path, map_location=lambda storage, loc: storage, weights_only=False)
