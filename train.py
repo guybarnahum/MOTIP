@@ -206,133 +206,161 @@ def train_engine(config: dict):
         # device_placement=[False]        # whether to place the data on the device
     )
 
-    for epoch in range(train_states["start_epoch"], config["EPOCHS"]):
-        logger.info(log=f"Start training epoch {epoch}.")
-        epoch_start_timestamp = TPS.timestamp()
-        # Prepare the sampler for the current epoch:
-        train_sampler.prepare_for_epoch(epoch=epoch)
-        # Train one epoch:
-        train_metrics = train_one_epoch(
-            accelerator=accelerator,
-            logger=logger,
-            states=train_states,
-            epoch=epoch,
-            dataloader=train_dataloader,
-            model=model,
-            detr_criterion=detr_criterion,
-            id_criterion=id_criterion,
-            optimizer=optimizer,
-            only_detr=only_detr,
-            lr_warmup_epochs=config["LR_WARMUP_EPOCHS"],
-            lr_warmup_tgt_lr=config["LR"],
-            detr_num_train_frames=config["DETR_NUM_TRAIN_FRAMES"],
-            detr_num_checkpoint_frames=config["DETR_NUM_CHECKPOINT_FRAMES"],
-            detr_criterion_batch_len=config.get("DETR_CRITERION_BATCH_LEN", 10),
-            use_decoder_checkpoint=config["USE_DECODER_CHECKPOINT"],
-            accumulate_steps=config["ACCUMULATE_STEPS"],
-            separate_clip_norm=config.get("SEPARATE_CLIP_NORM", True),
-            max_clip_norm=config.get("MAX_CLIP_NORM", 0.1),
-            use_accelerate_clip_norm=config.get("USE_ACCELERATE_CLIP_NORM", True),
-            # For multi last checkpoints:
-            outputs_dir=outputs_dir,
-            is_last_epochs=(epoch == config["EPOCHS"] - 1),
-            multi_last_checkpoints=config["MULTI_LAST_CHECKPOINTS"],
-            memory_efficient=config.get("MEMORY_EFFICIENT",False),
-            num_classes=config.get("NUM_CLASSES",None),
-            id_vocabulary=config.get("NUM_ID_VOCABULARY",None)
-        )
-
-        diag_log("Back in train_engine. Syncing metrics...")
-        
-        # 1. Get learning rate & Sync (Direct access avoids full state_dict copy)
-        lr = optimizer.param_groups[-1]["lr"]
-        train_metrics["lr"].update(lr)
-        
-        diag_log("Calling train_metrics.sync()...")
-        train_metrics["lr"].sync()
-        diag_log("Sync complete. Starting Safe Extraction...")
-
-        # 2. Extract values as floats and PURGE Metrics immediately
-        # This prevents the hang during dashboard string building
-        m = extract_metrics_safely(train_metrics)
-        del train_metrics
-        transition_purge(optimizer=optimizer)
-
-        time_per_epoch = TPS.format(TPS.timestamp() - epoch_start_timestamp)
-
-        # --- ENHANCED LOGGING FOR DASHBOARD ---
-        if accelerator.is_main_process:
-            dashboard_log = (
-                f"[Finish epoch: {epoch}] [Time: {time_per_epoch}] "
-                f"loss = {m['loss']:.4f}; detr_loss = {m['detr_loss']:.4f}; "
-                f"id_loss = {m['id_loss']:.4f}; class_error = {m['class_error']:.4f}; "
-                f"detr_grad_norm = {m['detr_grad_norm']:.4f};"
+    # 🛑 KEYBOARD INTERRUPT HANDLER WRAPPER 🛑
+    try:
+        for epoch in range(train_states["start_epoch"], config["EPOCHS"]):
+            logger.info(log=f"Start training epoch {epoch}.")
+            epoch_start_timestamp = TPS.timestamp()
+            # Prepare the sampler for the current epoch:
+            train_sampler.prepare_for_epoch(epoch=epoch)
+            # Train one epoch:
+            train_metrics = train_one_epoch(
+                accelerator=accelerator,
+                logger=logger,
+                states=train_states,
+                epoch=epoch,
+                dataloader=train_dataloader,
+                model=model,
+                detr_criterion=detr_criterion,
+                id_criterion=id_criterion,
+                optimizer=optimizer,
+                only_detr=only_detr,
+                lr_warmup_epochs=config["LR_WARMUP_EPOCHS"],
+                lr_warmup_tgt_lr=config["LR"],
+                detr_num_train_frames=config["DETR_NUM_TRAIN_FRAMES"],
+                detr_num_checkpoint_frames=config["DETR_NUM_CHECKPOINT_FRAMES"],
+                detr_criterion_batch_len=config.get("DETR_CRITERION_BATCH_LEN", 10),
+                use_decoder_checkpoint=config["USE_DECODER_CHECKPOINT"],
+                accumulate_steps=config["ACCUMULATE_STEPS"],
+                separate_clip_norm=config.get("SEPARATE_CLIP_NORM", True),
+                max_clip_norm=config.get("MAX_CLIP_NORM", 0.1),
+                use_accelerate_clip_norm=config.get("USE_ACCELERATE_CLIP_NORM", True),
+                # For multi last checkpoints:
+                outputs_dir=outputs_dir,
+                is_last_epochs=(epoch == config["EPOCHS"] - 1),
+                multi_last_checkpoints=config["MULTI_LAST_CHECKPOINTS"],
+                memory_efficient=config.get("MEMORY_EFFICIENT",False),
+                num_classes=config.get("NUM_CLASSES",None),
+                id_vocabulary=config.get("NUM_ID_VOCABULARY",None)
             )
-            logger.info(dashboard_log)
-            diag_log("Dashboard log printed.")
 
-        # --------------------------------------
+            diag_log("Back in train_engine. Syncing metrics...")
+            
+            # 1. Get learning rate & Sync (Direct access avoids full state_dict copy)
+            lr = optimizer.param_groups[-1]["lr"]
+            train_metrics["lr"].update(lr)
+            
+            diag_log("Calling train_metrics.sync()...")
+            train_metrics["lr"].sync()
+            diag_log("Sync complete. Starting Safe Extraction...")
 
-        # --- VISIBILITY: LOG RAM BEFORE SAVING ---
-        mem = psutil.virtual_memory()
-        logger.info(f"💾 [TRANSITION] Preparing Checkpoint. System RAM: {mem.percent}% ({mem.used/1e9:.1f}GB / {mem.total/1e9:.1f}GB)")
+            # 2. Extract values as floats and PURGE Metrics immediately
+            m = extract_metrics_safely(train_metrics)
+            del train_metrics
+            transition_purge(optimizer=optimizer)
 
-        # Save checkpoint:
-        if (epoch + 1) % config["SAVE_CHECKPOINT_PER_EPOCH"] == 0:
-            diag_log(f"Entering save_checkpoint. RAM: {psutil.virtual_memory().percent}%")
+            time_per_epoch = TPS.format(TPS.timestamp() - epoch_start_timestamp)
+
+            # --- ENHANCED LOGGING FOR DASHBOARD ---
+            if accelerator.is_main_process:
+                dashboard_log = (
+                    f"[Finish epoch: {epoch}] [Time: {time_per_epoch}] "
+                    f"loss = {m['loss']:.4f}; detr_loss = {m['detr_loss']:.4f}; "
+                    f"id_loss = {m['id_loss']:.4f}; class_error = {m['class_error']:.4f}; "
+                    f"detr_grad_norm = {m['detr_grad_norm']:.4f};"
+                )
+                logger.info(dashboard_log)
+                diag_log("Dashboard log printed.")
+
+            # --------------------------------------
+
+            # --- VISIBILITY: LOG RAM BEFORE SAVING ---
+            mem = psutil.virtual_memory()
+            logger.info(f"💾 [TRANSITION] Preparing Checkpoint. System RAM: {mem.percent}% ({mem.used/1e9:.1f}GB / {mem.total/1e9:.1f}GB)")
+
+            # Save checkpoint:
+            if (epoch + 1) % config["SAVE_CHECKPOINT_PER_EPOCH"] == 0:
+                diag_log(f"Entering save_checkpoint. RAM: {psutil.virtual_memory().percent}%")
+                save_checkpoint(
+                    model=model,
+                    path=os.path.join(outputs_dir, f"checkpoint_{epoch}.pth"),
+                    states=train_states,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    only_detr=only_detr
+                )
+                
+                # Post-Save Clean
+                transition_purge()
+                logger.info(f"✅ [TRANSITION] Checkpoint Saved & RAM Purged. Current RAM: {psutil.virtual_memory().percent}%")
+
+                if config["INFERENCE_DATASET"] is not None:
+                    assert config["INFERENCE_SPLIT"] is not None, f"Please set the INFERENCE_SPLIT for inference."
+                    eval_metrics = submit_and_evaluate_one_model(
+                        is_evaluate=True,
+                        accelerator=accelerator,
+                        state=state,
+                        logger=logger,
+                        model=model,
+                        data_root=config["DATA_ROOT"],
+                        dataset=config["INFERENCE_DATASET"],
+                        data_split=config["INFERENCE_SPLIT"],
+                        outputs_dir=os.path.join(outputs_dir, "train", "eval_during_train", f"epoch_{epoch}"),
+                        val_config=config.get("val_config", None),
+                        image_max_longer=config["INFERENCE_MAX_LONGER"],
+                        size_divisibility=config.get("SIZE_DIVISIBILITY", 0),
+                        miss_tolerance=config["MISS_TOLERANCE"],
+                        use_sigmoid=config["USE_FOCAL_LOSS"] if "USE_FOCAL_LOSS" in config else False,
+                        assignment_protocol=config["ASSIGNMENT_PROTOCOL"] if "ASSIGNMENT_PROTOCOL" in config else "hungarian",
+                        det_thresh=config["DET_THRESH"],
+                        newborn_thresh=config["NEWBORN_THRESH"],
+                        id_thresh=config["ID_THRESH"],
+                        area_thresh=config["AREA_THRESH"],
+                        inference_only_detr=config["INFERENCE_ONLY_DETR"] if config["INFERENCE_ONLY_DETR"] is not None
+                        else config["ONLY_DETR"],
+                    )
+                    eval_metrics.sync()
+                    logger.metrics(
+                        log=f"[Eval epoch: {epoch}] ",
+                        metrics=eval_metrics,
+                        fmt="{global_average:.4f}",
+                        statistic="global_average",
+                        global_step=train_states["global_step"],
+                        prefix="epoch",
+                        x_axis_step=epoch,
+                        x_axis_name="epoch",
+                    )
+
+            logger.success(log=f"Finish training epoch {epoch}.")
+            # Prepare for next step:
+            scheduler.step()
+
+    except KeyboardInterrupt:
+        # 🚨 GRACEFUL SHUTDOWN 🚨
+        if accelerator.is_main_process:
+            print(f"\n\n🛑 [INTERRUPT] Ctrl-C detected! Preparing for emergency shutdown...")
+            
+            # 1. Purge memory to maximize save safety
+            transition_purge(optimizer=optimizer)
+            
+            # 2. Save a 'last' checkpoint so you can resume exactly where you stopped
+            # Note: We use train_states['start_epoch'] which reflects the current progress
+            last_path = os.path.join(outputs_dir, f"checkpoint_interrupted_epoch_{train_states['start_epoch']}.pth")
+            print(f"💾 Saving 'Last Stand' checkpoint to: {last_path}")
             save_checkpoint(
                 model=model,
-                path=os.path.join(outputs_dir, f"checkpoint_{epoch}.pth"),
+                path=last_path,
                 states=train_states,
                 optimizer=optimizer,
                 scheduler=scheduler,
                 only_detr=only_detr
             )
-            
-            # Post-Save Clean
-            transition_purge()
-            logger.info(f"✅ [TRANSITION] Checkpoint Saved & RAM Purged. Current RAM: {psutil.virtual_memory().percent}%")
+            print(f"✅ Shutdown complete. You can resume using this checkpoint.\n")
+        
+        # In DDP, ensure all processes exit together
+        accelerator.wait_for_everyone()
+        sys.exit(0)
 
-            if config["INFERENCE_DATASET"] is not None:
-                assert config["INFERENCE_SPLIT"] is not None, f"Please set the INFERENCE_SPLIT for inference."
-                eval_metrics = submit_and_evaluate_one_model(
-                    is_evaluate=True,
-                    accelerator=accelerator,
-                    state=state,
-                    logger=logger,
-                    model=model,
-                    data_root=config["DATA_ROOT"],
-                    dataset=config["INFERENCE_DATASET"],
-                    data_split=config["INFERENCE_SPLIT"],
-                    outputs_dir=os.path.join(outputs_dir, "train", "eval_during_train", f"epoch_{epoch}"),
-                    val_config=config.get("val_config", None),
-                    image_max_longer=config["INFERENCE_MAX_LONGER"],
-                    size_divisibility=config.get("SIZE_DIVISIBILITY", 0),
-                    miss_tolerance=config["MISS_TOLERANCE"],
-                    use_sigmoid=config["USE_FOCAL_LOSS"] if "USE_FOCAL_LOSS" in config else False,
-                    assignment_protocol=config["ASSIGNMENT_PROTOCOL"] if "ASSIGNMENT_PROTOCOL" in config else "hungarian",
-                    det_thresh=config["DET_THRESH"],
-                    newborn_thresh=config["NEWBORN_THRESH"],
-                    id_thresh=config["ID_THRESH"],
-                    area_thresh=config["AREA_THRESH"],
-                    inference_only_detr=config["INFERENCE_ONLY_DETR"] if config["INFERENCE_ONLY_DETR"] is not None
-                    else config["ONLY_DETR"],
-                )
-                eval_metrics.sync()
-                logger.metrics(
-                    log=f"[Eval epoch: {epoch}] ",
-                    metrics=eval_metrics,
-                    fmt="{global_average:.4f}",
-                    statistic="global_average",
-                    global_step=train_states["global_step"],
-                    prefix="epoch",
-                    x_axis_step=epoch,
-                    x_axis_name="epoch",
-                )
-
-        logger.success(log=f"Finish training epoch {epoch}.")
-        # Prepare for next step:
-        scheduler.step()
     pass
 
 

@@ -30,6 +30,8 @@ def diag_log(msg: str):
     if diag_logs:
         sys.stderr.write(f"🚩 [DIAG] {msg}\n")
         sys.stderr.flush()
+    else:
+        print(msg)
 
 # ------------------------------------------------------------------------
 # LITE EVAL ENGINE: Fast Metrics Calculation
