@@ -73,11 +73,15 @@ val_config:
     pedestrian: 1
     car: 2
 
-# STABILITY FIX: Lowered from 1440 to 800 to prevent VRAM spikes during Eval.
-INFERENCE_MAX_LONGER: 800
+# ------------------------------------------------------------------------
+# THE "WAKE UP" SETTINGS: Seeing detections early in training
+# ------------------------------------------------------------------------
+DET_THRESH: 0.01        # Extremely low to catch early model "whispers"
+NEWBORN_THRESH: 0.01    # Allow tracks to start even with low confidence
+ID_THRESH: 0.01         # Allow ID assignment to be loose for now
+
+INFERENCE_MAX_LONGER: 1333
 ASSIGNMENT_PROTOCOL: hungarian
-# DET_THRESH: 0.3
-# ID_THRESH: 0.2
 
 USE_PARALLEL: False
 NUM_PARALLEL_CORES: 1
