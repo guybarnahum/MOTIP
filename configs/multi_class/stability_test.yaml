@@ -68,6 +68,7 @@ val_config:
   SPLIT_TO_EVAL: "val"
   CLASSES_TO_EVAL: ['pedestrian', 'car']
   LIMIT_VAL_FRAMES: 100
+  LIMIT_VAL_SEQ: 2
   CLASS_NAME_TO_ID: 
     pedestrian: 1
     car: 2

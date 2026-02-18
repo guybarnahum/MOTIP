@@ -43,8 +43,8 @@ def get_iou(bboxes1, bboxes2):
     union = area1[:, None] + area2 - inter
     return inter / (union + 1e-7)
 
+
 def lite_mot_eval(results_dir, gt_root, iou_thresh=0.5):
-    """Calculates MOTA and IDF1 without external heavy dependencies."""
     t_gt_dets, t_fp, t_fn, t_idsw, t_idtp = 0, 0, 0, 0, 0
     seq_files = [f for f in os.listdir(results_dir) if f.endswith('.txt')]
     
@@ -54,12 +54,18 @@ def lite_mot_eval(results_dir, gt_root, iou_thresh=0.5):
         gt_path = os.path.join(gt_root, seq_name, 'gt', 'gt.txt')
         if not os.path.exists(gt_path): continue
         
-        res_data = np.loadtxt(res_path, delimiter=',')
-        gt_data = np.loadtxt(gt_path, delimiter=',')
-        # Filter GT by visibility (only if column 6 exists)
-        if gt_data.shape[1] > 6:
-            gt_data = gt_data[gt_data[:, 6] > 0] 
-            
+        # 🚨 THE FIX: Force 2D even for single rows or empty files
+        res_data = np.atleast_2d(np.loadtxt(res_path, delimiter=','))
+        gt_data = np.atleast_2d(np.loadtxt(gt_path, delimiter=','))
+        
+        if res_data.size == 0 or gt_data.size == 0:
+            # Handle empty sequences gracefully
+            if gt_data.size > 0: t_gt_dets += len(gt_data); t_fn += len(gt_data)
+            if res_data.size > 0: t_fp += len(res_data)
+            continue
+
+        # Filter GT by visibility (column 6)
+        gt_data = gt_data[gt_data[:, 6] > 0] 
         frames = np.unique(gt_data[:, 0]).astype(int)
         last_matches = {} 
         
@@ -68,10 +74,8 @@ def lite_mot_eval(results_dir, gt_root, iou_thresh=0.5):
             f_gt = gt_data[gt_data[:, 0] == f]
             t_gt_dets += len(f_gt)
             
-            if len(f_gt) == 0:
-                t_fp += len(f_res); continue
-            if len(f_res) == 0:
-                t_fn += len(f_gt); continue
+            if len(f_gt) == 0: t_fp += len(f_res); continue
+            if len(f_res) == 0: t_fn += len(f_gt); continue
                 
             ious = get_iou(f_res[:, 2:6], f_gt[:, 2:6])
             res_idx, gt_idx = linear_sum_assignment(-ious)
@@ -120,13 +124,17 @@ def submit_and_evaluate_one_model(
         inference_only_detr: bool = False,
         dtype: str = "FP32",
         limit_frames: int = None,
+        limit_seqs: int = None,  # Set to None to evaluate all sequences
         **kwargs
 ):
-    # 1. Resolve Frame Limit immediately
+    # 1. Resolve Frame and Seq Limit immediately
     if limit_frames is None and val_config is not None:
         limit_frames = val_config.get("LIMIT_VAL_FRAMES", None)
 
-    # 2. FIX GEOMETRY: Standardize aspect ratio to avoid torchvision Resize errors
+    if limit_seqs is None and val_config is not None:
+        limit_seqs = val_config.get("LIMIT_VAL_SEQ", None)
+
+    # 2. FIX GEOMETRY: Ensure max_longer > max_shorter for torchvision v2.Resize
     if image_max_longer <= image_max_shorter:
         image_max_longer = 1333 
         
@@ -136,8 +144,18 @@ def submit_and_evaluate_one_model(
     # 3. Setup Dataset
     inf_ds = dataset_classes[dataset](data_root=data_root, split=data_split, load_annotation=False)
     torch_dtype = torch.float32 if dtype == "FP32" else torch.float16
-    
     all_seq_names = sorted(list(inf_ds.sequence_infos.keys()))
+    
+    # 🎲 RANDOMIZE: Shuffle with a fixed seed so all DDP processes 
+    # agree on the same random order before splitting.
+    random.Random(42).shuffle(all_seq_names)
+
+    # 🚨 SEQUENCE FILTERING: Trimming happens AFTER shuffle to get a diverse mix
+    if limit_seqs is not None and len(all_seq_names) > limit_seqs:
+        all_seq_names = all_seq_names[:limit_seqs]
+        sys.stderr.write(f"✂️ [EVAL] Trimming evaluation to first {limit_seqs} sequences for speed.\n")
+
+    # Properly split across DDP processes (if any)
     my_seq_names = [name for i, name in enumerate(all_seq_names) if i % state.num_processes == state.process_index]
 
     eval_rng = random.Random(42) 
@@ -175,6 +193,9 @@ def submit_and_evaluate_one_model(
 
         with open(txt_path, "w") as f:
             start_time = time.time()
+            # We track the number of frames actually processed for FPS calculation
+            frames_processed = 0
+            
             for t, (image, _) in enumerate(loader):
                 if t < start_f: continue
                 if t >= end_f: break 
@@ -187,28 +208,33 @@ def submit_and_evaluate_one_model(
                     id_map = memory.update(t, res["id"].tolist(), res["embeddings"])
                     res["id"] = torch.tensor([id_map.get(rid, rid) for rid in res["id"].tolist()], dtype=torch.int64)
 
-                # Frame index for window is normalized to t+1 for tracking consistency
+                # Write results in MOT format
                 for obj_id, bbox in zip(res["id"], res["bbox"]):
                     f.write(f"{t+1},{obj_id.item()},{bbox[0].item():.2f},{bbox[1].item():.2f},{bbox[2].item():.2f},{bbox[3].item():.2f},1,-1,-1,-1\n")
                 
-                if (t + 1 - start_f) % 25 == 0:
+                frames_processed += 1
+                
+                # Progress heartbeat
+                if frames_processed % 25 == 0:
                     curr_ram = psutil.virtual_memory().percent
-                    sys.stderr.write(f"   ∟ Progress: {t+1-start_f}/{actual_limit} | RAM: {curr_ram}% | Swap: {psutil.swap_memory().used/(1024**3):.1f}GB\n")
+                    sys.stderr.write(f"   ∟ Progress: {frames_processed}/{actual_limit} | RAM: {curr_ram}% | Swap: {psutil.swap_memory().used/(1024**3):.1f}GB\n")
                     sys.stderr.flush()
 
                 del res
-                if t % 50 == 0: torch.cuda.empty_cache()
+                if t % 50 == 0: 
+                    torch.cuda.empty_cache()
 
-            fps = actual_limit / max(1e-5, (time.time() - start_time))
+            fps = frames_processed / max(1e-5, (time.time() - start_time))
             sys.stderr.write(f"✅ Finished {sequence_name} | {fps:.1f} FPS\n")
             sys.stderr.flush()
 
-        # NUCLEAR PURGE per sequence
+        # NUCLEAR PURGE per sequence to keep baseline RAM at ~10%
         del loader, seq_ds, tracker, memory
         gc.collect() 
 
     accelerator.wait_for_everyone()
-    if not is_evaluate: return None
+    if not is_evaluate: 
+        return None
 
     # 5. Global Aggregation
     metrics = Metrics()
@@ -217,6 +243,8 @@ def submit_and_evaluate_one_model(
         sys.stderr.flush()
         
         gt_root = val_config.get("GT_FOLDER") if val_config else os.path.join(data_root, dataset, data_split)
+        
+        # Ensure lite_mot_eval uses the robust version with np.atleast_2d
         lite_res = lite_mot_eval(os.path.join(outputs_dir, "tracker"), gt_root)
         
         metrics["MOTA"].update(lite_res["MOTA"])
