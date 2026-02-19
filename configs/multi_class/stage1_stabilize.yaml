@@ -39,8 +39,8 @@ LR_WARMUP_EPOCHS: 1
 LR_DICTIONARY_SCALE: 1.0
 
 # Sampling Strategy (Foundation Phase)
-# We use 5 frames to establish short-term motion and category consistency.
-sampler_lengths: [5]
+# Shorten the temporal window to 4 frames to handle high object counts
+sampler_lengths: [4]
 sample_intervals: [2, 3]
 
 # ------------------------------------------------------------------------
@@ -54,11 +54,10 @@ PREFETCH_FACTOR: 2     # Lowered from 6 to reduce baseline pressure
 
 MEMORY_EFFICIENT: True
 
-# 720 Strategy: Optimized for A10G VRAM Stability
-# Provides ~20% VRAM relief compared to 800 standard
-AUG_MAX_SIZE: 720
-AUG_RANDOM_RESIZE: [400, 448, 480, 512, 544, 576, 608, 640, 672, 704, 720]
-AUG_RESIZE_SCALES: [400, 448, 480, 512, 544, 576, 608, 640, 672, 704, 720]
+# Drop to 608 to create a massive buffer for 400+ object frames
+AUG_MAX_SIZE: 608
+AUG_RANDOM_RESIZE: [256, 320, 384, 448, 480, 512, 544, 576, 608]
+AUG_RESIZE_SCALES: [256, 320, 384, 448, 480, 512, 544, 576, 608]
 
 # Optimization for Deformable DETR Sampling
 # Quality Priority: Kept at 4 to maintain detection accuracy.
