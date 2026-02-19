@@ -29,16 +29,13 @@ RESUME_OPTIMIZER: False
 RESUME_SCHEDULER: False
 
 # ------------------------------------------------------------------------
-# Training Strategy (6-Epoch Stabilization Optimized)
+# Training Strategy: 6-Epoch Stabilization
 # ------------------------------------------------------------------------
-EPOCHS: 6           # Increased to 6 for a balanced stabilization cycle
+EPOCHS: 6           
 LR: 2.0e-5          
-LR_DROP: 5          # Drop at 5 gives a final epoch of fine-tuning at 1/10th LR
+LR_DROP: 5          
 LR_BACKBONE: 2.0e-6
-LR_WARMUP_EPOCHS: 1 # Shortened warmup for quicker convergence
-
-# Learning Rate Scaling for Dictionary
-# We want the new ID embeddings (especially for Vehicles) to learn faster
+LR_WARMUP_EPOCHS: 1 
 LR_DICTIONARY_SCALE: 1.0
 
 # Sampling Strategy (Foundation Phase)
@@ -47,24 +44,21 @@ sampler_lengths: [5]
 sample_intervals: [2, 3]
 
 # ------------------------------------------------------------------------
-# Hardware Safety (A10G / 24GB VRAM)
+# Hardware Safety (A10G / 24GB VRAM / 30GB RAM)
 # ------------------------------------------------------------------------
 BATCH_SIZE: 1
 ACCUMULATE_STEPS: 4       
-
-# Quality Priority: Reduced workers to 2 to prevent instance hang on g5.2xlarge
-NUM_WORKERS: 2
-
-# Global flags for memory safety on A10G
-MEMORY_EFFICIENT: True
+NUM_WORKERS: 2        # Safe for g5.2xlarge
 USE_DECODER_CHECKPOINT: True
+PREFETCH_FACTOR: 2     # Lowered from 6 to reduce baseline pressure
 
-# Image Resolution Limits (Memory Safety for Stage 1)
-# Quality Priority: Maintaining POINTS at 4, but limiting MAX_SIZE to 720
-# to prevent the 22,000MB+ spikes that caused the previous crash.
+MEMORY_EFFICIENT: True
+
+# 720 Strategy: Optimized for A10G VRAM Stability
+# Provides ~20% VRAM relief compared to 800 standard
 AUG_MAX_SIZE: 720
-AUG_RANDOM_RESIZE: [256, 384, 448]
-AUG_RESIZE_SCALES: [400, 480, 512, 544, 576, 608]
+AUG_RANDOM_RESIZE: [400, 448, 480, 512, 544, 576, 608, 640, 672, 704, 720]
+AUG_RESIZE_SCALES: [400, 448, 480, 512, 544, 576, 608, 640, 672, 704, 720]
 
 # Optimization for Deformable DETR Sampling
 # Quality Priority: Kept at 4 to maintain detection accuracy.
@@ -72,11 +66,8 @@ DETR_DEC_N_POINTS: 4
 DETR_ENC_N_POINTS: 4
 
 # Output Directories (Handled automatically by train-start.sh)
-OUTPUT_DIR: null
-OUTPUTS_DIR: null
-
 # ------------------------------------------------------------------------
-# Validation Config (Monitor Regression & Learning)
+# Validation Config: Targeted Monitoring
 # ------------------------------------------------------------------------
 # Points to the symlinked 'universal' dataset
 val_config:
@@ -86,12 +77,20 @@ val_config:
   
   # Evaluate BOTH classes to monitor dual-head performance
   CLASSES_TO_EVAL: ['pedestrian', 'car'] 
+  LIMIT_VAL_FRAMES: 100
+  LIMIT_VAL_SEQ: 5      # Speed Hack: Process 5 sequences instead of 20
   CLASS_NAME_TO_ID: 
     pedestrian: 1
     car: 2
 
-# Inference Settings for Eval
-# We use object-max for stabilization phase as it is more permissive for new classes
-ASSIGNMENT_PROTOCOL: object-max
-DET_THRESH: 0.3
-ID_THRESH: 0.2
+# ------------------------------------------------------------------------
+# Inference Settings: "Wake Up" Mode
+# ------------------------------------------------------------------------
+INFERENCE_MAX_LONGER: 1333  # Safety Cap for VRAM
+ASSIGNMENT_PROTOCOL: hungarian
+DET_THRESH: 0.1             # Lowered to see early detections
+NEWBORN_THRESH: 0.1         # Lowered to allow tracks to start
+ID_THRESH: 0.1              # Consistency with wake-up mode
+
+USE_PARALLEL: False
+NUM_PARALLEL_CORES: 1
