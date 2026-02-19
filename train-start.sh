@@ -53,24 +53,26 @@ if [ $? -eq 0 ]; then
 fi
 
 # --- 3. Construct the Pipeline Command ---
+
 # Step A: Training
-# FIX: Added 'env' so stdbuf can handle the environment variable assignment
+# We keep stdbuf to force line-buffering (-oL) for stdout and stderr (-eL)
+# We ensure environment variables are passed correctly via 'env'
 TRAIN_CMD="stdbuf -oL -eL env PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True accelerate launch --mixed_precision=bf16 --num_processes=1 train.py --config-path $ABS_CONFIG_PATH --exp-name $UNIQUE_EXP_NAME"
 
-# Step B: Post-Processing (Call the separate script)
+# Step B: Post-Processing
 POST_CMD="./train-post.sh $ABS_CONFIG_PATH $OUTPUT_ROOT $LOG_FILE"
 
 # Step C: Auto-Dashboard (30 min refresh + Final Sweep)
-# Logic: While the training process is found in the process list, update every 1800s.
-# Once training finishes, run one final update to catch the last epoch metrics.
+# Added 'sync' before plotting to ensure the OS flushes the log file to disk
 INTERVAL=1800
-DASH_CMD="sleep 15; while pgrep -f '$UNIQUE_EXP_NAME' > /dev/null; do python plot_dashboard.py $LOG_FILE; echo \"Dashboard updated at \$(date). Next update in 30m...\"; sleep $INTERVAL; done; python plot_dashboard.py $LOG_FILE; echo '✅ Training finished. Final dashboard generated.'"
+DASH_CMD="sleep 15; while pgrep -f '$UNIQUE_EXP_NAME' > /dev/null; do sync; python plot_dashboard.py $LOG_FILE; echo \"Dashboard updated at \$(date). Next update in 30m...\"; sleep $INTERVAL; done; sync; python plot_dashboard.py $LOG_FILE; echo '✅ Training finished. Final dashboard generated.'"
 
 # Combined Command for Pane 0
-# We use ';' to ensure POST_CMD runs even if TRAIN_CMD had an error (to see partial results)
-FINAL_CMD="$TRAIN_CMD 2>&1 | tee $LOG_FILE; $POST_CMD"
+# IMPORTANT: '2>&1' MUST come before '|' to catch diagnostics in the tee
+FINAL_CMD="$TRAIN_CMD 2>&1 | tee -a $LOG_FILE; $POST_CMD"
 
 # --- 4. Launch ---
+
 # Create session in background
 tmux new-session -d -s "$SESSION_NAME"
 
