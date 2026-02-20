@@ -185,7 +185,8 @@ def load_mot_gt(gt_path):
             # Check if class/conf exists (standard MOT format has 9+ columns)
             if len(parts) >= 8:
                 conf = float(parts[6])
-                cls = int(float(parts[7])) # Sometimes parsed as float
+                # Subtract 1 to align dataset (1,2) with model (0,1)
+                cls = int(float(parts[7])) - 1
                 
                 # Filter 1: Ignore 'conf=0' (Standard 'Don't Care' flag in MOT)
                 if conf == 0:
