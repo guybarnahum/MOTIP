@@ -16,6 +16,7 @@ from data.joint_dataset import dataset_classes
 from data.seq_dataset import SeqDataset
 from models.runtime_tracker import RuntimeTracker
 from log.log import Metrics
+from collections import defaultdict
 
 try:
     from models.longterm_memory import LongTermMemory
@@ -38,25 +39,37 @@ def diag_log(msg: str):
 # ------------------------------------------------------------------------
 
 def get_iou(bboxes1, bboxes2):
-    """Calculates Intersection over Union for two sets of boxes."""
+    """ Helper for IoU calculation [x, y, w, h] """
     if bboxes1.shape[0] == 0 or bboxes2.shape[0] == 0:
         return np.zeros((bboxes1.shape[0], bboxes2.shape[0]))
-    b1, b2 = bboxes1.copy(), bboxes2.copy()
-    # Convert [x, y, w, h] to [x1, y1, x2, y2]
-    b1[:, 2:] += b1[:, :2]
-    b2[:, 2:] += b2[:, :2]
-    lt = np.maximum(b1[:, None, :2], b2[:, :2])
-    rb = np.minimum(b1[:, None, 2:], b2[:, 2:])
-    wh = np.maximum(rb - lt, 0)
-    inter = wh[:, :, 0] * wh[:, :, 1]
-    area1 = (b1[:, 2] - b1[:, 0]) * (b1[:, 3] - b1[:, 1])
-    area2 = (b2[:, 2] - b2[:, 0]) * (b2[:, 3] - b2[:, 1])
-    union = area1[:, None] + area2 - inter
-    return inter / (union + 1e-7)
+    
+    # Convert to x1, y1, x2, y2
+    b1 = np.copy(bboxes1); b1[:, 2:] += b1[:, :2]
+    b2 = np.copy(bboxes2); b2[:, 2:] += b2[:, :2]
+    
+    iou = np.zeros((len(b1), len(b2)))
+    for i, bc1 in enumerate(b1):
+        for j, bc2 in enumerate(b2):
+            iw = min(bc1[2], bc2[2]) - max(bc1[0], bc2[0])
+            ih = min(bc1[3], bc2[3]) - max(bc1[1], bc2[1])
+            if iw > 0 and ih > 0:
+                area1 = (bc1[2]-bc1[0])*(bc1[3]-bc1[1])
+                area2 = (bc2[2]-bc2[0])*(bc2[3]-bc2[1])
+                iou[i, j] = (iw*ih) / (area1 + area2 - iw*ih)
+    return iou
 
-
-def lite_mot_eval(results_dir, gt_root, iou_thresh=0.5):
-    t_gt_dets, t_fp, t_fn, t_idsw, t_idtp = 0, 0, 0, 0, 0
+def lite_mot_eval(results_dir, gt_root, classes=[1, 2], iou_thresh=0.5):
+    # Global Counters
+    stats = {
+        'overall': {'tp': 0, 'fp': 0, 'fn': 0, 'idsw': 0, 'gt_count': 0},
+        'per_class': {c: {'tp': 0, 'fp': 0, 'fn': 0, 'gt_count': 0} for c in classes}
+    }
+    
+    # Global ID tracking for AssA and IDF1
+    global_matches = defaultdict(lambda: defaultdict(int))
+    gt_id_existence = defaultdict(int)
+    pred_id_existence = defaultdict(int)
+    
     seq_files = [f for f in os.listdir(results_dir) if f.endswith('.txt')]
     
     for seq_file in seq_files:
@@ -65,47 +78,124 @@ def lite_mot_eval(results_dir, gt_root, iou_thresh=0.5):
         gt_path = os.path.join(gt_root, seq_name, 'gt', 'gt.txt')
         if not os.path.exists(gt_path): continue
         
-        # 🚨 THE FIX: Force 2D even for single rows or empty files
         res_data = np.atleast_2d(np.loadtxt(res_path, delimiter=','))
         gt_data = np.atleast_2d(np.loadtxt(gt_path, delimiter=','))
-        
-        if res_data.size == 0 or gt_data.size == 0:
-            # Handle empty sequences gracefully
-            if gt_data.size > 0: t_gt_dets += len(gt_data); t_fn += len(gt_data)
-            if res_data.size > 0: t_fp += len(res_data)
-            continue
+        if gt_data.size == 0: continue
 
-        # Filter GT by visibility (column 6)
-        gt_data = gt_data[gt_data[:, 6] > 0] 
+        # Filter GT: Column 6 (conf/flag) > 0 and extract columns
+        # MOT GT: frame(0), id(1), x(2), y(3), w(4), h(5), conf(6), class(7), vis(8)
+        gt_data = gt_data[gt_data[:, 6] > 0]
         frames = np.unique(gt_data[:, 0]).astype(int)
         last_matches = {} 
-        
+
         for f in frames:
-            f_res = res_data[res_data[:, 0] == f]
             f_gt = gt_data[gt_data[:, 0] == f]
-            t_gt_dets += len(f_gt)
+            f_res = res_data[res_data[:, 0] == f]
             
-            if len(f_gt) == 0: t_fp += len(f_res); continue
-            if len(f_res) == 0: t_fn += len(f_gt); continue
-                
+            # 1. Update denominators
+            stats['overall']['gt_count'] += len(f_gt)
+            for g_row in f_gt:
+                cls_id = int(g_row[7])
+                if cls_id in stats['per_class']:
+                    stats['per_class'][cls_id]['gt_count'] += 1
+                    gt_id_existence[f"{seq_name}_{int(g_row[1])}"] += 1
+
+            if len(f_res) > 0:
+                for p_id in f_res[:, 1]:
+                    pred_id_existence[f"{seq_name}_{int(p_id)}"] += 1
+
+            # 2. Geometric Matching
+            if len(f_res) == 0:
+                stats['overall']['fn'] += len(f_gt)
+                for g_row in f_gt:
+                    cls_id = int(g_row[7])
+                    if cls_id in stats['per_class']: stats['per_class'][cls_id]['fn'] += 1
+                continue
+
             ious = get_iou(f_res[:, 2:6], f_gt[:, 2:6])
             res_idx, gt_idx = linear_sum_assignment(-ious)
-            matched_count = 0
+            
+            matched_res = set()
+            matched_gt = set()
             
             for r, g in zip(res_idx, gt_idx):
                 if ious[r, g] >= iou_thresh:
                     gt_id, res_id = int(f_gt[g, 1]), int(f_res[r, 1])
+                    cls_id = int(f_gt[g, 7])
+                    
+                    # Track Global Association
+                    global_matches[f"{seq_name}_{gt_id}"][f"{seq_name}_{res_id}"] += 1
+                    
+                    # Track ID Switches
                     if gt_id in last_matches and last_matches[gt_id] != res_id:
-                        t_idsw += 1
+                        stats['overall']['idsw'] += 1
                     last_matches[gt_id] = res_id
-                    t_idtp += 1
-                    matched_count += 1
-            t_fn += (len(f_gt) - matched_count)
-            t_fp += (len(f_res) - matched_count)
+                    
+                    # Record TPs
+                    stats['overall']['tp'] += 1
+                    if cls_id in stats['per_class']:
+                        stats['per_class'][cls_id]['tp'] += 1
+                    
+                    matched_res.add(r)
+                    matched_gt.add(g)
+
+            # 3. Handle FPs and FNs
+            stats['overall']['fn'] += (len(f_gt) - len(matched_gt))
+            stats['overall']['fp'] += (len(f_res) - len(matched_res))
             
-    mota = 1 - (t_fp + t_fn + t_idsw) / max(1, t_gt_dets)
-    idf1 = (2 * t_idtp) / max(1, (2 * t_idtp + t_fp + t_fn))
-    return {"MOTA": mota, "IDF1": idf1}
+            # Per-Class FP/FN
+            for idx, g_row in enumerate(f_gt):
+                if idx not in matched_gt:
+                    cls_id = int(g_row[7])
+                    if cls_id in stats['per_class']: stats['per_class'][cls_id]['fn'] += 1
+            
+            for idx, r_row in enumerate(f_res):
+                if idx not in matched_res:
+                    # Note: We assume FP class matches the closest GT or we categorize it as general
+                    # If results file has class in col 7, use that:
+                    p_cls = int(r_row[7]) if r_row.shape[0] > 7 and r_row[7] != -1 else None
+                    if p_cls in stats['per_class']: stats['per_class'][p_cls]['fp'] += 1
+
+    # --- FINAL CALCULATION ---
+    # Global IDTP via Hungarian on sequence-total matches
+    gt_uids = list(gt_id_existence.keys())
+    pr_uids = list(pred_id_existence.keys())
+    idtp_global = 0
+    if gt_uids and pr_uids:
+        c_mat = np.zeros((len(gt_uids), len(pr_uids)))
+        u_gt_map = {uid: i for i, uid in enumerate(gt_uids)}
+        u_pr_map = {uid: i for i, uid in enumerate(pr_uids)}
+        for g_uid, p_dict in global_matches.items():
+            for p_uid, count in p_dict.items():
+                c_mat[u_gt_map[g_uid], u_pr_map[p_uid]] = count
+        r_i, c_i = linear_sum_assignment(-c_mat)
+        idtp_global = c_mat[r_i, c_i].sum()
+
+    # Derived Metrics
+    detA = stats['overall']['tp'] / max(1, stats['overall']['tp'] + stats['overall']['fp'] + stats['overall']['fn'])
+    idf1 = (2 * idtp_global) / max(1, sum(gt_id_existence.values()) + sum(pred_id_existence.values()))
+    
+    # AssA Calculation
+    assa_scores = []
+    for g_uid in gt_uids:
+        matches = global_matches[g_uid]
+        if matches:
+            best_p_uid = max(matches, key=matches.get)
+            match_count = matches[best_p_uid]
+            assa_scores.append(match_count / (gt_id_existence[g_uid] + pred_id_existence[best_p_uid] - match_count))
+        else: assa_scores.append(0)
+    assA = np.mean(assa_scores) if assa_scores else 0
+
+    return {
+        "DetA": detA * 100,
+        "AssA": assA * 100,
+        "IDF1": idf1 * 100,
+        "MOTA": (1 - (stats['overall']['fp'] + stats['overall']['fn'] + stats['overall']['idsw']) / max(1, stats['overall']['gt_count'])) * 100,
+        "Classes": {c: {
+            "Prec": (v['tp'] / max(1, v['tp'] + v['fp'])) * 100,
+            "Rec": (v['tp'] / max(1, v['gt_count'])) * 100
+        } for c, v in stats['per_class'].items()}
+    }
 
 # ------------------------------------------------------------------------
 # MAIN EVALUATION FUNCTION
