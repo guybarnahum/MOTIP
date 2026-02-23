@@ -492,24 +492,24 @@ def train_one_epoch(
             other_params.append(param)
 
     for step, data_dict in enumerate(dataloader):
-        # 1. Extract using the keys packed by collate_fn
-        samples = data_dict["images"]
-        targets = data_dict["annotations"]
+
+        # data_dict is the dictionary returned by your collate_fn
+        images = data_dict["images"]      # This is the NestedTensor [B, T, C, H, W]
+        annotations = data_dict["annotations"] # This is the List[List[Dict]]
+        # metas = data_dict["metas"]         # This is the metadata
 
         # 1. Check Format (NaNs, Giant Boxes)
-        verify_batch_integrity(targets, num_classes=num_classes, id_vocabulary=id_vocabulary, step=step)
+        verify_batch_integrity(annotations, num_classes=num_classes, id_vocabulary=id_vocabulary, step=step)
         
         # 2. Check Logic (The 500/500 Wall)
-        do_id_partition_sanity_check(targets, step, print_freq=100, accelerator=accelerator)
+        do_id_partition_sanity_check(annotations, step, print_freq=100, accelerator=accelerator)
         
         # 3. Monitor Balance
-        check_categorical_balance(targets, step)
+        check_categorical_balance(annotations, step)
 
         try:
             if memory_efficient:
                 torch.cuda.empty_cache()
-
-            images, annotations, metas = samples["images"], samples["annotations"], samples["metas"]
 
             # Normalize the images:
             # (Normally, it should be done in the dataloader, but here we do it in the training loop (on cuda).)
