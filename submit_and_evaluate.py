@@ -75,7 +75,12 @@ def lite_mot_eval(results_dir, gt_root, classes=[1, 2], iou_thresh=0.5):
         gt_path = os.path.join(gt_root, seq_name, 'gt', 'gt.txt')
         if not os.path.exists(gt_path): continue
         
-        res_data = np.atleast_2d(np.loadtxt(res_path, delimiter=','))
+        # Patch: Handle empty files or loading errors gracefully
+        try:
+            res_data = np.atleast_2d(np.loadtxt(res_path, delimiter=','))
+        except Exception:
+            res_data = np.array([]).reshape(0, 10) # Create empty 2D array if file is unreadable
+
         gt_data = np.atleast_2d(np.loadtxt(gt_path, delimiter=','))
         if gt_data.size == 0: continue
 
@@ -86,7 +91,12 @@ def lite_mot_eval(results_dir, gt_root, classes=[1, 2], iou_thresh=0.5):
         # Add a nested progress bar for frames in the current sequence
         for f in tqdm(frames, desc=f"   ∟ Processing {seq_name[:15]}...", leave=False):
             f_gt = gt_data[gt_data[:, 0] == f]
-            f_res = res_data[res_data[:, 0] == f]
+            
+            # Patch: Check size of res_data before indexing axis 0
+            if res_data.size > 0 and res_data.shape[1] > 0:
+                f_res = res_data[res_data[:, 0] == f]
+            else:
+                f_res = np.array([])
             
             stats['overall']['gt_count'] += len(f_gt)
             for g_row in f_gt:
