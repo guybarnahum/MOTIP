@@ -399,7 +399,7 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args, metric
             score = pred_scores[i]
             pid = pred_ids[i]
             # Write line standard MOT: frame, id, bb_left, bb_top, bb_width, bb_height, conf, x, y, z
-            res_f.write(f"{frame_idx},{pid},{l:.2f},{t:.2f},{w:.2f},{h:.2f},{score:.4f},-1,-1,-1\n")
+            res_f.write(f"{frame_idx},{pid},{l:.2f},{t:.2f},{w:.2f},{h:.2f},{score:.4f},{pred_cats[i]+1},-1,-1,-1\n")
 
         # --- DRAWING ---
         # Misses (Blue)
