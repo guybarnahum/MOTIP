@@ -493,7 +493,7 @@ def train_one_epoch(
         else:
             other_params.append(param)
 
-    for step, (samples, targets) in enumerate(dataloader):
+    for step, (samples, targets, metas) in enumerate(dataloader):
     
         # 1. Check Format (NaNs, Giant Boxes)
         verify_batch_integrity(targets, num_classes=num_classes, id_vocabulary=id_vocabulary, step=step)
