@@ -139,27 +139,26 @@ def collate_fn(batch):
     }
 
 
-def verify_batch_integrity(batch, num_classes=None, id_vocabulary=None, step=None):
+def verify_batch_integrity(targets, num_classes=None, id_vocabulary=None, step=None):
     """
     Runtime check to ensure Multi-Class labels, IDs, and BBoxes are within expected ranges.
-    Includes numerical stability checks (NaN/Inf) and coordinate system validation.
+    Restored with original detailed error messages and diagnostic logic.
     """
     all_categories = []
     all_ids = []
     all_bboxes = []
     
-    # Extract data from the batch structure
-    # Supports both list-based temporal windows and single-dict batches
-    annotations_source = batch["annotations"] if isinstance(batch, dict) else batch
-    
-    for b_idx, clip in enumerate(annotations_source):
-        # Handle cases where clip might be a single dict or a list of frames
-        frames = clip if isinstance(clip, list) else [clip]
-        for t_idx, ann in enumerate(frames):
+    # targets is Batch -> Time -> Dict
+    for b_idx, clip in enumerate(targets):
+        for t_idx, ann in enumerate(clip):
             if "category" in ann and ann["category"].numel() > 0:
-                all_categories.append(ann["category"])
-                all_ids.append(ann["id"])
-                all_bboxes.append(ann["bbox"])
+                # --- PADDING FILTER ---
+                # We must ignore the -1 padding from collate_fn to get accurate min/max
+                valid_mask = ann["id"] >= 0
+                if valid_mask.any():
+                    all_categories.append(ann["category"][valid_mask])
+                    all_ids.append(ann["id"][valid_mask])
+                    all_bboxes.append(ann["bbox"][valid_mask])
 
     if not all_categories:
         return  # Skip empty batches
@@ -211,13 +210,10 @@ def verify_batch_integrity(batch, num_classes=None, id_vocabulary=None, step=Non
             f"DETR requires normalized [0, 1] coordinates. Ensure you divide by width/height in dancetrack.py!"
         )
 
-    # Check for zero/negative width or height which causes GIoU to fail (NaN)
-    # Assumes [cx, cy, w, h] format
     if (all_bboxes[:, 2:] <= 0).any():
         raise ValueError(f"❌ [DIAGNOSTIC] Step {step}: Found BBox with zero or negative width/height!")
 
-    # --- MULTI-CLASS RANGE CHECK (Person 0-499, Vehicle 500-999) ---
-    # Upgraded to ValueError to act as a Hard Stop for Partition Integrity
+    # --- MULTI-CLASS RANGE CHECK ---
     person_ids = all_ids[all_categories == 0]
     vehicle_ids = all_ids[all_categories == 1]
 
@@ -237,60 +233,48 @@ def verify_batch_integrity(batch, num_classes=None, id_vocabulary=None, step=Non
         p_count = (all_categories == 0).sum().item()
         v_count = (all_categories == 1).sum().item()
         msg = f"🔍 [DEBUG Batch {step if step is not None else ''}] People={p_count} | Vehicles={v_count}"
-        
-        # Log only on the main process for distributed training
-        if torch.distributed.is_initialized():
-            if torch.distributed.get_rank() == 0:
-                print(msg)
-        else:
+        if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
+            print(msg)
+        elif not torch.distributed.is_initialized():
             print(msg)
 
 
-_CUMULATIVE_COUNTS = {0: 0, 1: 0} # Persistent storage for the epoch
-   
-def check_categorical_balance(batch, step, log_interval=100):
+def check_categorical_balance(targets, step, log_interval=100):
     """
-    Logs the distribution of classes in the current batch and cumulatively.
-    Category 0: Person, Category 1: Vehicle
+    Logs distribution of real objects (ignoring padding -1).
     """
     global _CUMULATIVE_COUNTS
-
     if step == 0:
         _CUMULATIVE_COUNTS = {0: 0, 1: 0}
 
-    # 1. Extract categories from batch
     batch_categories = []
-    for clip in batch["annotations"]:
+    for clip in targets:
         for ann in clip:
-            if ann["category"].numel() > 0:
-                batch_categories.append(ann["category"])
+            # Only count categories where the ID is not -1 (not padding)
+            valid_mask = ann["id"] >= 0
+            if valid_mask.any():
+                batch_categories.append(ann["category"][valid_mask])
     
     if not batch_categories:
         return
 
     batch_categories = torch.cat(batch_categories)
     
-    # 2. Update cumulative counts
     p_batch = (batch_categories == 0).sum().item()
     v_batch = (batch_categories == 1).sum().item()
     
     _CUMULATIVE_COUNTS[0] += p_batch
     _CUMULATIVE_COUNTS[1] += v_batch
 
-    # 3. Periodically log the balance
     if step % log_interval == 0:
         total = _CUMULATIVE_COUNTS[0] + _CUMULATIVE_COUNTS[1]
         p_ratio = (_CUMULATIVE_COUNTS[0] / total * 100) if total > 0 else 0
         v_ratio = (_CUMULATIVE_COUNTS[1] / total * 100) if total > 0 else 0
         
-        msg = (f"📊 [CLASS BALANCE] Step {step} | "
-               f"Total Objects: {total} | "
-               f"People: {p_ratio:.1f}% ({_CUMULATIVE_COUNTS[0]}) | "
-               f"Vehicles: {v_ratio:.1f}% ({_CUMULATIVE_COUNTS[1]})")
+        msg = (f"📊 [CLASS BALANCE] Step {step} | Total: {total} | "
+               f"People: {p_ratio:.1f}% | Vehicles: {v_ratio:.1f}%")
         
-        # Log only on the main process for distributed training
         if torch.distributed.is_initialized():
-            if torch.distributed.get_rank() == 0:
-                print(msg)
+            if torch.distributed.get_rank() == 0: print(msg)
         else:
             print(msg)

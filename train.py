@@ -43,64 +43,62 @@ def diag_log(msg: str):
 
 def do_id_partition_sanity_check(targets, step_idx, print_freq=50, accelerator=None):
     """
-    Combines Partition Verification (Boundary Check) and Instance Density Check.
-    
-    Args:
-        targets: The list of target dictionaries (annotations) from the DataLoader.
-        step_idx: The current training step/batch index.
-        print_freq: Frequency of the check.
-        accelerator: The Accelerator object (to ensure only the main process prints).
+    Fixed for MOTIP Batch structure: Batch -> Time -> Dict.
+    Uses 'id' and 'category' keys as defined in DanceTrack/collate_fn.
     """
-    # Only run on the main process and at the specified frequency
     is_main = accelerator.is_main_process if accelerator is not None else True
     if step_idx % print_freq != 0 or not is_main:
         return
 
     integrity_failure = False
     error_msg = ""
-    
-    # Instance counting for the whole batch
     total_p_count = 0
     total_v_count = 0
 
     print(f"\n🔍 [INTEGRITY CHECK] Step {step_idx}:")
 
-    for b_idx, target in enumerate(targets):
-        # target might be a list of frames (if training with temporal windows)
-        # or a single dict. We handle both by ensuring we look at the tensors.
-        if isinstance(target, list):
-            ids = torch.cat([torch.as_tensor(t['id_labels']) for t in target])
-            cats = torch.cat([torch.as_tensor(t['class_labels']) for t in target])
-        else:
-            ids = target['id_labels']
-            cats = target['class_labels']
+    # targets is Batch -> Time -> Dict
+    for b_idx, clip in enumerate(targets):
+        for t_idx, frame in enumerate(clip):
+            # 1. Access the correct keys from your DanceTrack dataset
+            ids = frame['id']        # Ground Truth IDs
+            cats = frame['category']  # 0=Person, 1=Vehicle
+            
+            # 2. Filter out Padding (-1) before checking
+            # Your collate_fn uses -1 for padding; we must ignore these.
+            valid_mask = ids >= 0
+            if not valid_mask.any():
+                continue
+                
+            v_ids = ids[valid_mask]
+            v_cats = cats[valid_mask]
 
-        # 1. Update Density Counters (0=Person, 1=Vehicle)
-        total_p_count += (cats == 0).sum().item()
-        total_v_count += (cats == 1).sum().item()
+            # 3. Update Density Counters
+            total_p_count += (v_cats == 0).sum().item()
+            total_v_count += (v_cats == 1).sum().item()
 
-        # 2. Hard Boundary Verification
-        # --- PERSON CHECK ---
-        person_mask = (cats == 0)
-        if person_mask.any():
-            p_ids = ids[person_mask]
-            p_max = p_ids.max().item()
-            if p_max >= 500:
-                error_msg = f"FATAL: Person ID {p_max} >= 500 boundary at Batch {step_idx} (Item {b_idx})!"
-                integrity_failure = True
-                break
+            # 4. Hard Boundary Verification
+            # --- PERSON CHECK (Category 0) ---
+            person_mask = (v_cats == 0)
+            if person_mask.any():
+                p_max = v_ids[person_mask].max().item()
+                if p_max >= 500:
+                    error_msg = f"FATAL: Person ID {p_max} >= 500 at Step {step_idx} (BatchItem {b_idx}, Frame {t_idx})!"
+                    integrity_failure = True
+                    break
 
-        # --- VEHICLE CHECK ---
-        vehicle_mask = (cats == 1)
-        if vehicle_mask.any():
-            v_ids = ids[vehicle_mask]
-            v_min = v_ids.min().item()
-            if v_min < 500:
-                error_msg = f"FATAL: Vehicle ID {v_min} < 500 boundary at Batch {step_idx} (Item {b_idx})!"
-                integrity_failure = True
-                break
+            # --- VEHICLE CHECK (Category 1) ---
+            vehicle_mask = (v_cats == 1)
+            if vehicle_mask.any():
+                v_min = v_ids[vehicle_mask].min().item()
+                if v_min < 500:
+                    error_msg = f"FATAL: Vehicle ID {v_min} < 500 at Step {step_idx} (BatchItem {b_idx}, Frame {t_idx})!"
+                    integrity_failure = True
+                    break
+        
+        if integrity_failure:
+            break
 
-    # 3. Final Reporting and Circuit Breaking
     if integrity_failure:
         print("\n" + "!"*80)
         print(f"🛑 DATA INTEGRITY CIRCUIT BREAKER TRIGGERED")
@@ -109,7 +107,7 @@ def do_id_partition_sanity_check(targets, step_idx, print_freq=50, accelerator=N
         print("!"*80 + "\n")
         sys.exit(1)
 
-    # Print current batch stats
+    # Final reporting
     print(f"   ∟ Density: People={total_p_count} | Vehicles={total_v_count}")
     if total_p_count == 0 and total_v_count == 0:
         print("   ⚠️  WARNING: This batch contains ZERO labeled objects!")
@@ -493,8 +491,11 @@ def train_one_epoch(
         else:
             other_params.append(param)
 
-    for step, (samples, targets, metas) in enumerate(dataloader):
-    
+    for step, data_dict in enumerate(dataloader):
+        # 1. Extract using the keys packed by collate_fn
+        samples = data_dict["images"]
+        targets = data_dict["annotations"]
+
         # 1. Check Format (NaNs, Giant Boxes)
         verify_batch_integrity(targets, num_classes=num_classes, id_vocabulary=id_vocabulary, step=step)
         
