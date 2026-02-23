@@ -19,13 +19,6 @@ from utils_inference import recover_embeddings
 from models.motip import build as build_model
 from models.runtime_tracker import RuntimeTracker
 
-# --- Import Memory Manager ---
-try:
-    from models.longterm_memory import LongTermMemory
-except ImportError:
-    print("⚠️ Warning: models/longterm_memory.py not found. Viz will skip Re-ID.")
-    LongTermMemory = None
-
 # -------------------------------------------------------------------------
 # NEW: Metric Accumulator (The Brain 🧠)
 # -------------------------------------------------------------------------
@@ -282,11 +275,6 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args, metric
     )
     tracker.bbox_unnorm = torch.tensor([W, H, W, H], device=device).float()
     
-    # 🧠 Initialize Memory for this specific sequence
-    memory = None
-    if LongTermMemory is not None:
-        memory = LongTermMemory(patience=900, gallery_size=5, similarity_thresh=0.85)
-
     gt_data = load_mot_gt(gt_path)
     
     # NEW: Setup Result Export (Standard MOT Format)
@@ -323,18 +311,6 @@ def process_sequence(seq_path, gt_path, output_path, model, device, args, metric
         tracker.update(img_norm)
         res = tracker.get_track_results()
         
-        # --- Memory Correction Logic ---
-        if memory is not None and "embeddings" in res:
-            raw_ids = res["id"].tolist()
-            if len(raw_ids) > 0:
-                # Update memory & get re-mapping
-                id_map = memory.update(frame_idx, raw_ids, res["embeddings"])
-                
-                # Remap IDs
-                remapped_ids = [id_map.get(rid, rid) for rid in raw_ids]
-                res["id"] = torch.tensor(remapped_ids, dtype=torch.int64, device=res["id"].device)
-        # -------------------------------
-
         raw_pred_boxes = res['bbox'].cpu().numpy()
         pred_ids = res['id'].tolist()
         # NEW: Handle scores for histogram

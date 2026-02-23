@@ -19,11 +19,6 @@ from models.runtime_tracker import RuntimeTracker
 from log.log import Metrics
 from collections import defaultdict
 
-try:
-    from models.longterm_memory import LongTermMemory
-except ImportError:
-    LongTermMemory = None
-
 # --- DIAGNOSTIC HELPERS ---
 diag_logs = False
 
@@ -276,8 +271,7 @@ def submit_and_evaluate_one_model(
             miss_tolerance, det_thresh, newborn_thresh, id_thresh, 
             area_thresh, inference_only_detr, torch_dtype
         )
-        memory = LongTermMemory(patience=900) if LongTermMemory else None
-
+        
         # Random Window Selection
         total_frames = len(loader)
         start_f = eval_rng.randint(0, max(0, total_frames - (limit_frames or 1))) if limit_frames else 0
@@ -301,10 +295,6 @@ def submit_and_evaluate_one_model(
                 tracker.update(image=image)
                 res = tracker.get_track_results()
                 
-                if memory and "embeddings" in res and len(res["id"]) > 0:
-                    id_map = memory.update(t, res["id"].tolist(), res["embeddings"])
-                    res["id"] = torch.tensor([id_map.get(rid, rid) for rid in res["id"].tolist()], dtype=torch.int64)
-
                 # Write results in MOT format
                 for obj_id, bbox in zip(res["id"], res["bbox"]):
                     f.write(f"{t+1},{obj_id.item()},{bbox[0].item():.2f},{bbox[1].item():.2f},{bbox[2].item():.2f},{bbox[3].item():.2f},1,-1,-1,-1\n")
@@ -324,7 +314,7 @@ def submit_and_evaluate_one_model(
             diag_log(f"✅ Finished {sequence_name} | {fps:.1f} FPS")
 
         # NUCLEAR PURGE per sequence to keep baseline RAM at ~10%
-        del loader, seq_ds, tracker, memory
+        del loader, seq_ds, tracker
         gc.collect() 
 
     accelerator.wait_for_everyone()
