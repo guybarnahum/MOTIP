@@ -1,0 +1,17 @@
+# configs/original_dancetrack.yaml
+SUPER_CONFIG_PATH: ./configs/r50_deformable_detr_motip_dancetrack.yaml
+
+# Critical: This must be False to load the ID head
+only_detr: False
+
+# Use the original 1-class setup
+num_classes: 1
+num_id_vocabulary: 500
+
+# Path to the official weights
+detr_pretrain: ./pretrains/motip_dancetrack.pth
+
+# Inference settings
+det_thresh: 0.4
+newborn_thresh: 0.4
+id_thresh: 0.1
