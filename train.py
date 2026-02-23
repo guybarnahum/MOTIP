@@ -493,16 +493,16 @@ def train_one_epoch(
         else:
             other_params.append(param)
 
-    for step, samples in enumerate(dataloader):
-
+    for step, (samples, targets) in enumerate(dataloader):
+    
         # 1. Check Format (NaNs, Giant Boxes)
-        verify_batch_integrity(samples, num_classes=num_classes, id_vocabulary=id_vocabulary, step=step)
+        verify_batch_integrity(targets, num_classes=num_classes, id_vocabulary=id_vocabulary, step=step)
         
         # 2. Check Logic (The 500/500 Wall)
-        do_id_partition_sanity_check(samples, step, print_freq=100, accelerator=accelerator)
+        do_id_partition_sanity_check(targets, step, print_freq=100, accelerator=accelerator)
         
         # 3. Monitor Balance
-        check_categorical_balance(samples, step)
+        check_categorical_balance(targets, step)
 
         try:
             if memory_efficient:
