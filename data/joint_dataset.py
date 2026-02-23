@@ -37,6 +37,9 @@ class JointDataset(Dataset):
             datasets: The list of dataset names, e.g., ["DanceTrack", "SportsMOT"].
             splits: The list of (dataset) split names, e.g., ["train", "train"].
         """
+        
+        print(f"🚀 [DEBUG] Initializing JointDataset Wrapper (datasets: {datasets})")
+
         super().__init__()
         assert len(datasets) == len(splits), "The number of datasets and splits should be the same."
         self.transforms = transforms

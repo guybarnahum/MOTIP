@@ -138,16 +138,24 @@ def collate_fn(batch):
         "metas": metas,
     }
 
+
 def verify_batch_integrity(batch, num_classes=None, id_vocabulary=None, step=None):
     """
     Runtime check to ensure Multi-Class labels, IDs, and BBoxes are within expected ranges.
+    Includes numerical stability checks (NaN/Inf) and coordinate system validation.
     """
     all_categories = []
     all_ids = []
     all_bboxes = []
     
-    for b_idx, clip in enumerate(batch["annotations"]):
-        for t_idx, ann in enumerate(clip):
+    # Extract data from the batch structure
+    # Supports both list-based temporal windows and single-dict batches
+    annotations_source = batch["annotations"] if isinstance(batch, dict) else batch
+    
+    for b_idx, clip in enumerate(annotations_source):
+        # Handle cases where clip might be a single dict or a list of frames
+        frames = clip if isinstance(clip, list) else [clip]
+        for t_idx, ann in enumerate(frames):
             if "category" in ann and ann["category"].numel() > 0:
                 all_categories.append(ann["category"])
                 all_ids.append(ann["id"])
@@ -194,8 +202,7 @@ def verify_batch_integrity(batch, num_classes=None, id_vocabulary=None, step=Non
     
     # --- BOUNDING BOX "GIANT BOX" CHECK ---
     # DETR models expect normalized coordinates in [0, 1].
-    # We allow a small margin (-0.5 to 1.5) for augmentation/clipping, but anything larger 
-    # indicates a coordinate system mismatch (e.g., raw pixels).
+    # Margin allowed for augmentation, but values > 2.0 indicate raw pixel coordinates.
     box_min = all_bboxes.min().item()
     box_max = all_bboxes.max().item()
     if box_max > 2.0 or box_min < -1.0:
@@ -210,18 +217,19 @@ def verify_batch_integrity(batch, num_classes=None, id_vocabulary=None, step=Non
         raise ValueError(f"❌ [DIAGNOSTIC] Step {step}: Found BBox with zero or negative width/height!")
 
     # --- MULTI-CLASS RANGE CHECK (Person 0-499, Vehicle 500-999) ---
+    # Upgraded to ValueError to act as a Hard Stop for Partition Integrity
     person_ids = all_ids[all_categories == 0]
     vehicle_ids = all_ids[all_categories == 1]
 
     if person_ids.numel() > 0:
         p_max = person_ids.max().item()
         if p_max >= 500:
-            print(f"⚠️ [WARNING] Step {step}: Person Category (0) has IDs in Vehicle range: {p_max}")
+            raise ValueError(f"❌ [DIAGNOSTIC] Step {step}: Partition Violation! Person (0) has IDs in Vehicle range (>=500): {p_max}")
             
     if vehicle_ids.numel() > 0:
         v_min = vehicle_ids.min().item()
         if v_min < 500:
-            print(f"⚠️ [WARNING] Step {step}: Vehicle Category (1) has IDs in Person range: {v_min}")
+            raise ValueError(f"❌ [DIAGNOSTIC] Step {step}: Partition Violation! Vehicle (1) has IDs in Person range (<500): {v_min}")
 
     # --- BATCH COMPOSITION LOGGING ---
     should_log = (step is None) or (step % 50 == 0)
@@ -229,9 +237,12 @@ def verify_batch_integrity(batch, num_classes=None, id_vocabulary=None, step=Non
         p_count = (all_categories == 0).sum().item()
         v_count = (all_categories == 1).sum().item()
         msg = f"🔍 [DEBUG Batch {step if step is not None else ''}] People={p_count} | Vehicles={v_count}"
-        if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
-            print(msg)
-        elif not torch.distributed.is_initialized():
+        
+        # Log only on the main process for distributed training
+        if torch.distributed.is_initialized():
+            if torch.distributed.get_rank() == 0:
+                print(msg)
+        else:
             print(msg)
 
 

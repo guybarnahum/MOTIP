@@ -23,10 +23,10 @@ class IDCriterion(nn.Module):
         return
 
     def forward(self, id_logits, id_labels, id_masks, id_categories=None):
-        # id_logits: [B, G, T, N, C]
+        # id_logits: [B, G, T, N, C]  (C=1000)
         # id_labels: [B, G, T, N]
         # id_masks:  [B, G, T, N]
-        # id_categories: [B, G, T, N] (New for multi-class support)
+        # id_categories: [B, G, T, N] (0=Person, 1=Vehicle)
 
         # Remove the first T for supervision:
         id_logits = id_logits[:, :, 1:, :, :]
@@ -35,22 +35,48 @@ class IDCriterion(nn.Module):
         
         if id_categories is not None:
             id_categories = id_categories[:, :, 1:, :]
-        pass
 
         # Flatten:
         id_logits_flatten = einops.rearrange(id_logits, "b g t n c -> (b g t n) c")
         id_labels_flatten = einops.rearrange(id_labels, "b g t n -> (b g t n)")
         id_masks_flatten = einops.rearrange(id_masks, "b g t n -> (b g t n)")
         
+        # --- NEW: Flatten Categories ---
+        id_cats_flatten = None
+        if id_categories is not None:
+            id_cats_flatten = einops.rearrange(id_categories, "b g t n -> (b g t n)")
+
         # Filter out the invalid id labels:
         valid_indices = ~id_masks_flatten
         id_logits_flatten = id_logits_flatten[valid_indices]
         id_labels_flatten = id_labels_flatten[valid_indices]
+        
+        # ✅ FIX 1: Apply Logit Masking for Multi-Class Partitioning
+        if id_cats_flatten is not None:
+            id_cats_flatten = id_cats_flatten[valid_indices]
+            
+            # Create a large negative mask to kill forbidden logits
+            # Use -10000.0 or -1e9. Softmax will turn these into 0.0 probability.
+            mask = torch.zeros_like(id_logits_flatten)
+            
+            # Category 0 (Person): Mask out indices 500-999
+            is_person = (id_cats_flatten == 0)
+            mask[is_person, 500:] = -10000.0
+            
+            # Category 1 (Vehicle): Mask out indices 0-499
+            is_vehicle = (id_cats_flatten == 1)
+            mask[is_vehicle, :500] = -10000.0
+            
+            # Add mask to logits before loss
+            id_logits_flatten = id_logits_flatten + mask
 
         # Calculate the loss:
         if self.use_focal_loss:
             id_labels_flatten_one_hot = labels_to_one_hot(id_labels_flatten, class_num=id_logits_flatten.shape[-1])
-            id_labels_flatten_one_hot = torch.tensor(id_labels_flatten_one_hot, device=id_logits.device)
+            # Ensure it is a tensor and on correct device
+            if not isinstance(id_labels_flatten_one_hot, torch.Tensor):
+                id_labels_flatten_one_hot = torch.from_numpy(id_labels_flatten_one_hot).to(id_logits.device)
+            
             loss = sigmoid_focal_loss(inputs=id_logits_flatten, targets=id_labels_flatten_one_hot).sum()
         else:
             loss = self.ce_loss(id_logits_flatten, id_labels_flatten).sum()

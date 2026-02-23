@@ -10,7 +10,6 @@ from utils.misc import distributed_device
 from utils.box_ops import box_cxcywh_to_xywh
 from models.misc import get_model
 
-
 class RuntimeTracker:
     def __init__(
             self,
@@ -63,10 +62,17 @@ class RuntimeTracker:
         # Trajectory fields:
         self.next_id = 0
         self.id_label_to_id = {}
-        self.id_queue = OrderedSet()
-        # Init id_queue:
-        for i in range(self.num_id_vocabulary):
-            self.id_queue.add(i)
+        
+        # --- ENHANCEMENT: Split ID Queues for Multi-Class ---
+        self.person_id_queue = OrderedSet()
+        self.vehicle_id_queue = OrderedSet()
+        # Init split queues:
+        for i in range(0, 500):
+            self.person_id_queue.add(i)
+        for i in range(500, self.num_id_vocabulary):
+            self.vehicle_id_queue.add(i)
+        # ---------------------------------------------------
+
         # All fields are in shape (T, N, ...)
         self.trajectory_features = torch.zeros(
             (0, 0, 256), dtype=dtype, device=distributed_device(),
@@ -87,7 +93,6 @@ class RuntimeTracker:
         self.trajectory_masks = torch.zeros(
             (0, 0), dtype=torch.bool, device=distributed_device(),
         )
-        # self.trajectory_features = torch.zeros(())
 
         self.current_track_results = {}
         return
@@ -118,27 +123,16 @@ class RuntimeTracker:
         for _ in range(len(id_pred_labels)):
             if id_pred_labels[_].item() != self.num_id_vocabulary:
                 n_activate_id_labels += 1
-                self.id_queue.add(id_pred_labels[_].item())
+                # Update correct queue based on class
+                if categories[_] == 0:
+                    self.person_id_queue.add(id_pred_labels[_].item())
+                else:
+                    self.vehicle_id_queue.add(id_pred_labels[_].item())
             else:
                 n_newborn_targets += 1
 
-        # Make sure the length of newborn instances is less than the length of remaining IDs:
-        n_remaining_ids = len(self.id_queue) - n_activate_id_labels
-        if n_newborn_targets > n_remaining_ids:
-            keep_idxs = torch.ones(len(id_pred_labels), dtype=torch.bool, device=id_pred_labels.device)
-            newborn_idxs = (id_pred_labels == self.num_id_vocabulary)
-            newborn_keep_idxs = torch.ones(len(newborn_idxs), dtype=torch.bool, device=newborn_idxs.device)
-            newborn_keep_idxs[n_remaining_ids:] = False
-            keep_idxs[newborn_idxs] = newborn_keep_idxs
-            scores = scores[keep_idxs]
-            categories = categories[keep_idxs]
-            boxes = boxes[keep_idxs]
-            output_embeds = output_embeds[keep_idxs]
-            id_pred_labels = id_pred_labels[keep_idxs]
-        pass
-
-        # Assign new id labels:
-        id_labels = self._assign_newborn_id_labels(pred_id_labels=id_pred_labels)
+        # Assign new id labels (now class-aware):
+        id_labels = self._assign_newborn_id_labels(pred_id_labels=id_pred_labels, categories=categories)
 
         if len(torch.unique(id_labels)) != len(id_labels):
             print(id_labels, id_labels.shape)
@@ -148,7 +142,6 @@ class RuntimeTracker:
         self.current_track_results = {
             "score": scores,
             "category": categories,
-            # "bbox": boxes * self.bbox_unnorm,
             "bbox": box_cxcywh_to_xywh(boxes) * self.bbox_unnorm,
             "id": torch.tensor(
                 [self.id_label_to_id[_] for _ in id_labels.tolist()], dtype=torch.int64,
@@ -156,9 +149,12 @@ class RuntimeTracker:
             "embeddings": output_embeds 
         }
 
-        # Update id_queue:
+        # Update id_queues:
         for _ in range(len(id_labels)):
-            self.id_queue.add(id_labels[_].item())
+            if categories[_] == 0:
+                self.person_id_queue.add(id_labels[_].item())
+            else:
+                self.vehicle_id_queue.add(id_labels[_].item())
 
         # Update trajectory infos:
         self._update_trajectory_infos(boxes=boxes, output_embeds=output_embeds, id_labels=id_labels, categories=categories)
@@ -180,7 +176,6 @@ class RuntimeTracker:
         area = boxes[:, 2] * self.bbox_unnorm[2] * boxes[:, 3] * self.bbox_unnorm[3]
         activate_indices = (scores > self.det_thresh) & (area > self.area_thresh)
         # Selecting:
-        # logits = logits[activate_indices]
         boxes = boxes[activate_indices]
         output_embeds = output_embeds[activate_indices]
         scores = scores[activate_indices]
@@ -192,7 +187,6 @@ class RuntimeTracker:
             return self.num_id_vocabulary * torch.ones(boxes.shape[0], dtype=torch.int64, device=boxes.device)
         else:
             # 1. prepare current infos:
-            # Note: T=1 for current frame "unknowns"
             current_features = output_embeds[None, ...]     # (T, N, C)
             current_boxes = boxes[None, ...]                # (T, N, 4)
             current_masks = torch.zeros((1, output_embeds.shape[0]), dtype=torch.bool, device=distributed_device())
@@ -201,7 +195,6 @@ class RuntimeTracker:
             )
             
             # 2. prepare seq_info:
-            # We must ensure categories matches the 4D expectation of the IDDecoder (B, G, T, N)
             seq_info = {
                 "trajectory_features": self.trajectory_features[None, None, ...],    # (B, G, T, N, C)
                 "trajectory_boxes": self.trajectory_boxes[None, None, ...],          # (B, G, T, N, 4)
@@ -212,11 +205,7 @@ class RuntimeTracker:
                 
                 "unknown_features": current_features[None, None, ...],               # (B, G, T, N, C)
                 "unknown_boxes": current_boxes[None, None, ...],                     # (B, G, T, N, 4)
-                
-                # --- FIX: Ensure 4D shape (1, 1, 1, N) for Multi-Class Gating ---
                 "unknown_class_labels": categories[None, None, None, ...], 
-                # -----------------------------------------------------------------
-                
                 "unknown_masks": current_masks[None, None, ...],                     # (B, G, T, N)
                 "unknown_times": current_times[None, None, ...],                     # (B, G, T, N)
             }
@@ -225,9 +214,18 @@ class RuntimeTracker:
             seq_info = self.model(seq_info=seq_info, part="trajectory_modeling")
             id_logits, _, _ = self.model(seq_info=seq_info, part="id_decoder")
             
-            # 4. get scores:
-            # id_logits shape is (B, G, T, N, Vocabulary) -> (1, 1, 1, N, Vocab)
-            id_logits = id_logits[0, 0, 0]
+            # 4. get scores (with masking):
+            id_logits = id_logits[0, 0, 0] # (N, Vocab)
+            
+            # --- ENHANCEMENT: Logit Masking to enforce partitions ---
+            mask = torch.zeros_like(id_logits)
+            is_person = (categories == 0)
+            is_vehicle = (categories == 1)
+            mask[is_person, 500:] = -10000.0
+            mask[is_vehicle, :500] = -10000.0
+            id_logits = id_logits + mask
+            # --------------------------------------------------------
+
             if not self.use_sigmoid:
                 id_scores = id_logits.softmax(dim=-1)
             else:
@@ -243,40 +241,49 @@ class RuntimeTracker:
             id_pred_labels = torch.tensor(id_labels, dtype=torch.int64, device=distributed_device())
             return id_pred_labels
 
-    def _assign_newborn_id_labels(self, pred_id_labels: torch.Tensor):
-        # 1. how many newborn instances?
-        n_newborns = (pred_id_labels == self.num_id_vocabulary).sum().item()
-        if n_newborns == 0:
+    def _assign_newborn_id_labels(self, pred_id_labels: torch.Tensor, categories: torch.Tensor):
+        # 1. handle newborns for each category separately
+        newborn_mask = (pred_id_labels == self.num_id_vocabulary)
+        if not newborn_mask.any():
             return pred_id_labels
-        else:
-            # 2. get available id labels from id_queue:
-            newborn_id_labels = torch.tensor(
-                list(self.id_queue)[:n_newborns], dtype=torch.int64, device=distributed_device(),
-            )
-            # 3. make sure these id labels are not in trajectory infos:
-            trajectory_remove_idxs = torch.zeros(
-                self.trajectory_id_labels.shape[1], dtype=torch.bool, device=distributed_device(),
-            )
-            for _ in range(len(newborn_id_labels)):
-                if self.trajectory_id_labels.shape[0] > 0:
-                    trajectory_remove_idxs |= (self.trajectory_id_labels[0] == newborn_id_labels[_])
-                if newborn_id_labels[_].item() in self.id_label_to_id:
-                    self.id_label_to_id.pop(newborn_id_labels[_].item())
-            # remove from trajectory infos:
-            self.trajectory_features = self.trajectory_features[:, ~trajectory_remove_idxs]
-            self.trajectory_boxes = self.trajectory_boxes[:, ~trajectory_remove_idxs]
-            self.trajectory_id_labels = self.trajectory_id_labels[:, ~trajectory_remove_idxs]
-            self.trajectory_category_labels = self.trajectory_category_labels[:, ~trajectory_remove_idxs]
-            self.trajectory_times = self.trajectory_times[:, ~trajectory_remove_idxs]
-            self.trajectory_masks = self.trajectory_masks[:, ~trajectory_remove_idxs]
-            # 4. assign id labels to newborn instances:
-            pred_id_labels[pred_id_labels == self.num_id_vocabulary] = newborn_id_labels
-            # 5. update id infos:
-            for _ in range(len(newborn_id_labels)):
-                self.id_label_to_id[newborn_id_labels[_].item()] = self.next_id
-                self.next_id += 1
 
-            return pred_id_labels
+        # Indices of detections that need a newborn ID
+        newborn_indices = newborn_mask.nonzero(as_tuple=True)[0]
+        
+        for idx in newborn_indices:
+            cat = categories[idx].item()
+            # 2. get available id from correct queue
+            queue = self.person_id_queue if cat == 0 else self.vehicle_id_queue
+            
+            if len(queue) > 0:
+                new_id_label = list(queue)[0]
+                # 3. cleanup logic (remove from existing trajectory if necessary)
+                trajectory_remove_idxs = torch.zeros(
+                    self.trajectory_id_labels.shape[1], dtype=torch.bool, device=distributed_device(),
+                )
+                if self.trajectory_id_labels.shape[0] > 0:
+                    trajectory_remove_idxs |= (self.trajectory_id_labels[0] == new_id_label)
+                
+                if trajectory_remove_idxs.any():
+                    self.trajectory_features = self.trajectory_features[:, ~trajectory_remove_idxs]
+                    self.trajectory_boxes = self.trajectory_boxes[:, ~trajectory_remove_idxs]
+                    self.trajectory_id_labels = self.trajectory_id_labels[:, ~trajectory_remove_idxs]
+                    self.trajectory_category_labels = self.trajectory_category_labels[:, ~trajectory_remove_idxs]
+                    self.trajectory_times = self.trajectory_times[:, ~trajectory_remove_idxs]
+                    self.trajectory_masks = self.trajectory_masks[:, ~trajectory_remove_idxs]
+
+                if new_id_label in self.id_label_to_id:
+                    self.id_label_to_id.pop(new_id_label)
+                
+                # 4. assign
+                pred_id_labels[idx] = new_id_label
+                self.id_label_to_id[new_id_label] = self.next_id
+                self.next_id += 1
+                # The ID is removed from the queue in the update() loop's add() logic via OrderedSet uniqueness 
+                # but let's be explicit:
+                queue.discard(new_id_label)
+
+        return pred_id_labels
 
     def _update_trajectory_infos(self, boxes: torch.Tensor, output_embeds: torch.Tensor, id_labels: torch.Tensor, categories: torch.Tensor):
         # 1. cut trajectory infos:
@@ -298,7 +305,6 @@ class RuntimeTracker:
             _N = len(newborn_id_labels_list)
             _id_labels = einops.repeat(newborn_id_labels_tensor, 'n -> t n', t=_T)
             
-            # Map newborns to categories:
             newborn_cat_list = []
             for nid in newborn_id_labels_list:
                 idx = (id_labels == nid).nonzero(as_tuple=True)[0][0]
@@ -345,7 +351,7 @@ class RuntimeTracker:
         self.trajectory_category_labels = torch.cat([self.trajectory_category_labels, current_categories[None, ...]], dim=0).contiguous()
         self.trajectory_times = torch.cat([self.trajectory_times, current_times[None, ...]], dim=0).contiguous()
         self.trajectory_masks = torch.cat([self.trajectory_masks, current_masks[None, ...]], dim=0).contiguous()
-        # 4.4. a hack implementation to fix "times":
+        # 4.4. fix "times":
         self.trajectory_times = einops.repeat(
             torch.arange(self.trajectory_times.shape[0], dtype=torch.int64, device=distributed_device()),
             't -> t n', n=self.trajectory_times.shape[1],
@@ -382,54 +388,45 @@ class RuntimeTracker:
         return id_labels
 
     def _object_max_assignment(self, id_scores: torch.Tensor):
-        id_labels = list()  # final ID labels
-        trajectory_id_labels_set = set(self.trajectory_id_labels[0].tolist())   # all tracked ID labels
-
-        object_max_confs, object_max_id_labels = torch.max(id_scores, dim=-1)   # get the target ID labels and confs
-        # Get the max confs of each ID label:
+        id_labels = list()
+        trajectory_id_labels_set = set(self.trajectory_id_labels[0].tolist())
+        object_max_confs, object_max_id_labels = torch.max(id_scores, dim=-1)
         id_max_confs = dict()
         for conf, id_label in zip(object_max_confs.tolist(), object_max_id_labels.tolist()):
             if id_label not in id_max_confs:
                 id_max_confs[id_label] = conf
             else:
-                # if conf == id_max_confs[id_label]:  # a very rare case
-                #     conf = conf - 0.0001
                 id_max_confs[id_label] = max(id_max_confs[id_label], conf)
         if self.num_id_vocabulary in id_max_confs:
-            id_max_confs[self.num_id_vocabulary] = 0.0  # special token
+            id_max_confs[self.num_id_vocabulary] = 0.0
 
-        # Assign ID labels:
         for _ in range(len(object_max_id_labels)):
-            if object_max_id_labels[_].item() not in trajectory_id_labels_set:         # not in tracked IDs -> newborn
+            if object_max_id_labels[_].item() not in trajectory_id_labels_set:
                 id_labels.append(self.num_id_vocabulary)
             else:
                 _id_label = object_max_id_labels[_].item()
                 _conf = object_max_confs[_].item()
-                if _conf < self.id_thresh or _conf < id_max_confs[_id_label]:  # low conf or not the max conf -> newborn
+                if _conf < self.id_thresh or _conf < id_max_confs[_id_label]:
                     id_labels.append(self.num_id_vocabulary)
                 elif _id_label in id_labels:
                     id_labels.append(self.num_id_vocabulary)
-                else:                                                          # normal case
+                else:
                     id_labels.append(_id_label)
-
         return id_labels
 
     def _id_max_assignment(self, id_scores: torch.Tensor):
-        id_labels = [self.num_id_vocabulary] * len(id_scores)  # final ID labels
-        trajectory_id_labels_set = set(self.trajectory_id_labels[0].tolist())   # all tracked ID labels
-
+        id_labels = [self.num_id_vocabulary] * len(id_scores)
+        trajectory_id_labels_set = set(self.trajectory_id_labels[0].tolist())
         id_max_confs, id_max_obj_idxs = torch.max(id_scores, dim=0)
-        # Get the max confs of each object:
         object_max_confs = dict()
         for conf, object_idx in zip(id_max_confs.tolist(), id_max_obj_idxs.tolist()):
             if object_idx not in object_max_confs:
                 object_max_confs[object_idx] = conf
             else:
-                if conf == object_max_confs[object_idx]:    # a very rare case
+                if conf == object_max_confs[object_idx]:
                     conf = conf - 0.0001
                 object_max_confs[object_idx] = max(object_max_confs[object_idx], conf)
 
-        # Assign ID labels:
         for _ in range(len(id_max_obj_idxs)):
             _obj_idx, _id_label, _conf = id_max_obj_idxs[_].item(), _, id_max_confs[_].item()
             if _conf < self.id_thresh or _conf < object_max_confs[_obj_idx]:
@@ -438,5 +435,4 @@ class RuntimeTracker:
                 pass
             else:
                 id_labels[_obj_idx] = _id_label
-
         return id_labels

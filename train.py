@@ -40,6 +40,83 @@ def diag_log(msg: str):
         sys.stderr.write(f"🚩 [DIAG] {msg}\n")
         sys.stderr.flush()
 
+
+def do_id_partition_sanity_check(targets, step_idx, print_freq=50, accelerator=None):
+    """
+    Combines Partition Verification (Boundary Check) and Instance Density Check.
+    
+    Args:
+        targets: The list of target dictionaries (annotations) from the DataLoader.
+        step_idx: The current training step/batch index.
+        print_freq: Frequency of the check.
+        accelerator: The Accelerator object (to ensure only the main process prints).
+    """
+    # Only run on the main process and at the specified frequency
+    is_main = accelerator.is_main_process if accelerator is not None else True
+    if step_idx % print_freq != 0 or not is_main:
+        return
+
+    integrity_failure = False
+    error_msg = ""
+    
+    # Instance counting for the whole batch
+    total_p_count = 0
+    total_v_count = 0
+
+    print(f"\n🔍 [INTEGRITY CHECK] Step {step_idx}:")
+
+    for b_idx, target in enumerate(targets):
+        # target might be a list of frames (if training with temporal windows)
+        # or a single dict. We handle both by ensuring we look at the tensors.
+        if isinstance(target, list):
+            ids = torch.cat([torch.as_tensor(t['id_labels']) for t in target])
+            cats = torch.cat([torch.as_tensor(t['class_labels']) for t in target])
+        else:
+            ids = target['id_labels']
+            cats = target['class_labels']
+
+        # 1. Update Density Counters (0=Person, 1=Vehicle)
+        total_p_count += (cats == 0).sum().item()
+        total_v_count += (cats == 1).sum().item()
+
+        # 2. Hard Boundary Verification
+        # --- PERSON CHECK ---
+        person_mask = (cats == 0)
+        if person_mask.any():
+            p_ids = ids[person_mask]
+            p_max = p_ids.max().item()
+            if p_max >= 500:
+                error_msg = f"FATAL: Person ID {p_max} >= 500 boundary at Batch {step_idx} (Item {b_idx})!"
+                integrity_failure = True
+                break
+
+        # --- VEHICLE CHECK ---
+        vehicle_mask = (cats == 1)
+        if vehicle_mask.any():
+            v_ids = ids[vehicle_mask]
+            v_min = v_ids.min().item()
+            if v_min < 500:
+                error_msg = f"FATAL: Vehicle ID {v_min} < 500 boundary at Batch {step_idx} (Item {b_idx})!"
+                integrity_failure = True
+                break
+
+    # 3. Final Reporting and Circuit Breaking
+    if integrity_failure:
+        print("\n" + "!"*80)
+        print(f"🛑 DATA INTEGRITY CIRCUIT BREAKER TRIGGERED")
+        print(error_msg)
+        print("Stopping training immediately to prevent model corruption.")
+        print("!"*80 + "\n")
+        sys.exit(1)
+
+    # Print current batch stats
+    print(f"   ∟ Density: People={total_p_count} | Vehicles={total_v_count}")
+    if total_p_count == 0 and total_v_count == 0:
+        print("   ⚠️  WARNING: This batch contains ZERO labeled objects!")
+    else:
+        print(f"   ✅ All IDs within strict 500/500 partitions.")
+
+
 def extract_metrics_safely(train_metrics: Metrics):
     """Extracts values as raw floats to break tensor graph links before purging."""
     diag_log("Extracting metric values as floats...")
@@ -418,25 +495,20 @@ def train_one_epoch(
 
     for step, samples in enumerate(dataloader):
 
-        verify_batch_integrity(samples, num_classes=num_classes, id_vocabulary=id_vocabulary,step=step)
+        # 1. Check Format (NaNs, Giant Boxes)
+        verify_batch_integrity(samples, num_classes=num_classes, id_vocabulary=id_vocabulary, step=step)
+        
+        # 2. Check Logic (The 500/500 Wall)
+        do_id_partition_sanity_check(samples, step, print_freq=100, accelerator=accelerator)
+        
+        # 3. Monitor Balance
         check_categorical_balance(samples, step)
 
         try:
             if memory_efficient:
                 torch.cuda.empty_cache()
-            
-            images, annotations, metas = samples["images"], samples["annotations"], samples["metas"]
 
-            # --- DEBUG: MULTI-CLASS RUNTIME VERIFICATION ---
-            if step % 100 == 0 and accelerator.is_main_process:
-                # Count instances in the first video of the batch across all frames
-                batch_cats = torch.cat([torch.as_tensor(ann['category']) for ann in annotations[0]])
-                p_count = (batch_cats == 1).sum().item()
-                v_count = (batch_cats == 2).sum().item()
-                print(f"\n🔍 [DEBUG Step {step}] Batch Verification: People={p_count} | Vehicles={v_count}")
-                if p_count == 0 and v_count == 0:
-                    print("⚠️  Warning: Current batch contains no labeled objects!")
-            # -----------------------------------------------
+            images, annotations, metas = samples["images"], samples["annotations"], samples["metas"]
 
             # Normalize the images:
             # (Normally, it should be done in the dataloader, but here we do it in the training loop (on cuda).)

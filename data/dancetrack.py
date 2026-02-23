@@ -17,6 +17,8 @@ class DanceTrack(OneDataset):
             split: str = "train",
             load_annotation: bool = True,
     ):
+        print(f"🚀 [DEBUG] Initializing DanceTrack Dataset Class (split: {split})")
+
         super(DanceTrack, self).__init__(
             data_root=data_root,
             sub_dir=sub_dir,
@@ -70,18 +72,19 @@ class DanceTrack(OneDataset):
         sequence_names = self._get_sequence_names()
         # Init the annotations:
         annotations = self._init_annotations(sequence_names)
+
+        # --- MULTI-CLASS ID RE-INDEXING (GLOBAL) ---
+        # Map raw IDs to vocabulary ranges: Person [0, 499], Vehicle [500, 999]
+        id_map = {} 
+        next_person_idx = 0
+        next_vehicle_idx = 500
+        # -------------------------------------------
+
         # Load the annotations:
         for sequence_name in sequence_names:
             sequence_dir = self._get_sequence_dir(self.data_dir, self.split, sequence_name)
             gt_file_path = os.path.join(sequence_dir, "gt", "gt.txt")
             
-            # --- MULTI-CLASS ID RE-INDEXING ---
-            # Map raw IDs to vocabulary ranges: Person [0, 499], Vehicle [500, 999]
-            id_map = {} 
-            next_person_idx = 0
-            next_vehicle_idx = 500
-            # ----------------------------------
-
             with open(gt_file_path, "r") as gt_file:
                 for line in gt_file:
                     line = line.strip().split(",")
@@ -95,16 +98,18 @@ class DanceTrack(OneDataset):
                     category = int(class_id) - 1  # Person becomes 0, Vehicle becomes 1
 
                     # --- MAP RAW ID TO VOCABULARY RANGE ---
-                    if (raw_obj_id, category) not in id_map:
+                    mapping_key = (sequence_name, raw_obj_id, category)
+                    
+                    if mapping_key not in id_map:
                         if category == 0:  # Person
-                            id_map[(raw_obj_id, category)] = next_person_idx
+                            id_map[mapping_key] = next_person_idx
                             next_person_idx = (next_person_idx + 1) % 500
                         else:  # Vehicle
-                            id_map[(raw_obj_id, category)] = next_vehicle_idx
+                            id_map[mapping_key] = next_vehicle_idx
                             # Ensure vehicle index stays within 500-999
                             next_vehicle_idx = 500 + ((next_vehicle_idx - 500 + 1) % 500)
                     
-                    obj_id = id_map[(raw_obj_id, category)]
+                    obj_id = id_map[mapping_key]
                     # ---------------------------------------
                     
                     bbox = [x, y, w, h]
@@ -123,8 +128,9 @@ class DanceTrack(OneDataset):
         for sequence_name in sequence_names:
             for i in range(self.sequence_infos[sequence_name]["length"]):
                 annotations[sequence_name][i]["is_legal"] = is_legal(annotations[sequence_name][i])
-        return annotations 
+        return annotations
     
+
     def _init_annotations(self, sequence_names):
         annotations = dict()
         for sequence_name in sequence_names:
