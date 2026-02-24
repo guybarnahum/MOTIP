@@ -26,52 +26,65 @@ class Annotator:
             if self.fps_avg == 0: self.fps_avg = fps_inst
             else: self.fps_avg = (self.fps_smoothing * self.fps_avg) + ((1 - self.fps_smoothing) * fps_inst)
 
+
     def draw_dashboard(self, frame, frame_idx, gpu_name, memory_stats):
-        """Draws status bar at the BOTTOM. Returns NEW frame."""
+        """Draws multi-class status bar at the BOTTOM. Returns NEW frame."""
         H, W = frame.shape[:2]
-        bar_h = 40
-        y_start = H - bar_h  # Start of the bar (e.g. 1040 for a 1080p video)
-        text_y = H - 12      # Baseline for text
+        bar_h = 45 # Slightly taller for better readability
+        y_start = H - bar_h  
+        text_y = H - 15      
         
+        # 1. Semi-transparent background bar
         overlay = frame.copy()
-        cv2.rectangle(overlay, (0, y_start), (W, H), (20, 20, 20), -1)
-        alpha = 0.8
+        cv2.rectangle(overlay, (0, y_start), (W, H), (15, 15, 15), -1)
+        alpha = 0.85
         frame = cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0)
 
-        # FPS & GPU
-        cv2.putText(frame, f"FPS: {int(self.fps_avg)}", (15, text_y), self.font, 0.7, self.c_cyan, 2)
-        cv2.putText(frame, f"| {gpu_name}", (140, text_y), self.font, 0.6, self.c_white, 1)
+        # 2. System Info (FPS & GPU)
+        cv2.putText(frame, f"FPS: {int(self.fps_avg)}", (15, text_y), self.font, 0.6, self.c_cyan, 2)
+        cv2.putText(frame, f"| {gpu_name}", (120, text_y), self.font, 0.5, self.c_white, 1)
 
-        # Stats
+        # 3. Multi-Class Object Counts
+        # We assume memory_stats now contains 'person_count' and 'vehicle_count'
+        p_count = memory_stats.get('person_count', 0)
+        v_count = memory_stats.get('vehicle_count', 0)
+        
+        # Draw People Count (Greenish)
+        p_text = f"People: {p_count}"
+        cv2.putText(frame, p_text, (W//4, text_y), self.font, 0.6, (0, 255, 150), 2)
+        
+        # Draw Vehicle Count (Blueish)
+        v_text = f"Vehicles: {v_count}"
+        cv2.putText(frame, v_text, (W//4 + 180, text_y), self.font, 0.6, (255, 150, 0), 2)
+
+        # 4. LTM Stats
         gal_size = memory_stats.get('gallery_size', 0)
         active_overrides = memory_stats.get('active_overrides', 0)
         
-        mem_text = f"LTM Gallery: {gal_size}"
-        rev_text = f"Overrides: {active_overrides}"
+        mem_text = f"LTM: {gal_size}"
+        cv2.putText(frame, mem_text, (W//2 + 150, text_y), self.font, 0.5, self.c_white, 1)
         
-        cv2.putText(frame, mem_text, (W//2 - 150, text_y), self.font, 0.6, self.c_white, 1)
-        
-        # Highlight Overrides count only if non-zero
-        rev_color = self.c_orange if active_overrides > 0 else (150, 150, 150)
-        cv2.putText(frame, rev_text, (W//2 + 50, text_y), self.font, 0.6, rev_color, 2)
+        # Highlight Overrides
+        rev_color = self.c_orange if active_overrides > 0 else (100, 100, 100)
+        cv2.putText(frame, f"Ovr: {active_overrides}", (W//2 + 300, text_y), self.font, 0.5, rev_color, 2)
 
-        # Frame Count
-        fr_text = f"Frame: {frame_idx}"
-        (fw, _), _ = cv2.getTextSize(fr_text, self.font, 0.7, 2)
-        cv2.putText(frame, fr_text, (W - fw - 20, text_y), self.font, 0.7, self.c_white, 2)
+        # 5. Frame Progress
+        fr_text = f"FR: {frame_idx}"
+        (fw, _), _ = cv2.getTextSize(fr_text, self.font, 0.6, 2)
+        cv2.putText(frame, fr_text, (W - fw - 20, text_y), self.font, 0.6, self.c_white, 2)
         
         return frame
 
     def draw_tracks(self, frame, boxes, final_ids, categories, original_ids=None):
         """
-        Compact drawing: 'ID 5' or 'ID 5 > 50'.
-        Now supports category-based color palettes and labels.
-        categories: list of int (1 for Person, 2 for Vehicle)
+        Compact drawing: 'Person 5' or 'Vehicle 505'.
+        Aligned with RuntimeTracker: 0 for Person, 1 for Vehicle.
         """
         if original_ids is None: original_ids = final_ids
 
-        # Mapping for display text
-        cat_names = {1: "Person", 2: "Vehicle"}
+        # --- FIX: Match RuntimeTracker categories ---
+        # Tracker uses 0 for Person, 1 for Vehicle
+        cat_names = {0: "Person", 1: "Vehicle"}
 
         for i, (box, obj_id) in enumerate(zip(boxes, final_ids)):
             x, y, w, h = [int(v) for v in box]
@@ -79,12 +92,13 @@ class Annotator:
             cat_id = categories[i]
             
             # --- CATEGORY-AWARE COLOR LOGIC ---
-            # Strategy: Use different starting offsets in the color palette 
-            # to ensure People and Vehicles look distinctly different.
-            if cat_id == 1: # Person
-                color = self.colors[(obj_id + 100) % 1000] 
-            else: # Vehicle (Car, etc.)
-                color = self.colors[(obj_id + 600) % 1000]
+            # Using specific zones in the color palette:
+            # People: Lower half of palette (offset by tracker ID)
+            # Vehicles: Upper half of palette (offset by tracker ID)
+            if cat_id == 0: # Person
+                color = self.colors[obj_id % 500] 
+            else: # Vehicle
+                color = self.colors[(obj_id % 500) + 500]
 
             # 1. Main Box
             cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
@@ -92,24 +106,24 @@ class Annotator:
             # 2. Text Logic
             cat_prefix = cat_names.get(cat_id, "OBJ")
             if obj_id != orig_id:
-                # Revival Case: Compact Label "Person ID 5 > 50"
-                label = f"{cat_prefix} {obj_id} > {orig_id}"
+                # Revival Case: "Person 5 > 50" (LongTerm Memory active)
+                label = f"{cat_prefix} {obj_id}>{orig_id}"
             else:
-                # Normal Case
+                # Normal Case: "Person 5"
                 label = f"{cat_prefix} {obj_id}"
             
             # 3. Draw Label
-            (tw, th), _ = cv2.getTextSize(label, self.font, 0.5, 2) # Slightly smaller font for density
+            (tw, th), _ = cv2.getTextSize(label, self.font, 0.45, 1) # Leaner font for higher density
             
-            # Clamp label position so it stays on screen
-            lbl_y = y - 10
+            # Clamp label position so it stays inside the frame
+            lbl_y = y - 5
             if lbl_y < 20: 
-                lbl_y = y + 25
+                lbl_y = y + th + 10
 
-            # Background Rectangle (Solid color based on class)
-            cv2.rectangle(frame, (x, lbl_y - th - 5), (x + tw + 10, lbl_y + 5), color, -1)
+            # Background Rectangle (Solid color based on class/ID)
+            cv2.rectangle(frame, (x, lbl_y - th - 5), (x + tw + 4, lbl_y + 2), color, -1)
             
-            # Text (White for better contrast on solid background)
-            cv2.putText(frame, label, (x + 5, lbl_y), self.font, 0.5, self.c_white, 2)
+            # Text (White or Black depending on color brightness could be added, but c_white is fine)
+            cv2.putText(frame, label, (x + 2, lbl_y - 2), self.font, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
 
         return frame

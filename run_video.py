@@ -268,18 +268,30 @@ def main():
             # --- A. INFERENCE ---
             tracker.update(img_norm)
             
-            # --- B. DATA EXTRACTION ---
+            # --- B. DATA EXTRACTION  ---
             res = tracker.get_track_results()
-            valid_boxes = res['bbox'].cpu().float().numpy() # [N, 4]
-            valid_ids = res['id'].tolist()                  # [N]
-            valid_cats = res['category'].cpu().tolist()     # Extract categories
 
-            active_embeds = res.get('embeddings', None)
+            # IMPORTANT: Filter out Background/Unknown IDs before sending to Memory or Annotator
+            # This prevents drawing "ID 1000" ghosts.
+            mask = res['id'] != tracker.num_id_vocabulary
+            
+            # Slice once, move to CPU once
+            active_res = {k: v[mask] for k, v in res.items() if isinstance(v, torch.Tensor)}
+            active_res_cpu = {k: v.cpu() for k, v in active_res.items()}
+
+            valid_ids = active_res_cpu['id'].tolist() 
+            valid_cats = active_res_cpu['category'].tolist()
+            valid_boxes = active_res_cpu['bbox'].float().numpy()
+            
+            # Keep these for ReID on original device
+            active_ids_gpu = active_res['id']
+            active_embeds = active_res.get('embeddings')
 
             # --- C. MEMORY UPDATE ---
             final_ids = []
             if memory is not None and active_embeds is not None and len(valid_ids) > 0:
-                id_map = memory.update(frame_idx, valid_ids, active_embeds)
+                # Use the GPU tensor directly to avoid Re-Tensoring
+                id_map = memory.update(frame_idx, active_ids_gpu, active_embeds)
                 final_ids = [id_map.get(vid, vid) for vid in valid_ids]
             else:
                 final_ids = valid_ids
@@ -290,24 +302,26 @@ def main():
             annotator.update_fps(loop_time)
             
             # 2. Draw Tracks (In-Place)
-            annotator.draw_tracks(frame, valid_boxes, final_ids, valid_ids,categories=valid_cats)
+            if len(final_ids) > 0:
+                annotator.draw_tracks(frame, valid_boxes, final_ids, categories=valid_cats, original_ids=valid_ids)
             
             # 3. Draw Dashboard 
             # Calculate ACTIVE revivals for this specific frame only
             # Count how many objects have a different final_id than their tracker id
-            current_overrides_count = sum(1 for o, f in zip(valid_ids, final_ids) if o != f)
+                 
+            p_count = valid_cats.count(0) if len(valid_cats) > 0 else 0 # Tracker uses 0 for Person
+            v_count = valid_cats.count(1) if len(valid_cats) > 0 else 0 # Tracker uses 1 for Vehicle
+
+            # Ensure we are comparing clean Python ints
+            current_overrides_count = sum(1 for o, f in zip(map(int, valid_ids), map(int, final_ids)) if o != f)
             
-            if memory is not None:
-                mem_stats = {
-                    "gallery_size": len(memory.storage),
-                    "active_overrides": current_overrides_count 
-                }
-            else:
-                mem_stats = {
-                    "gallery_size": 0,
-                    "active_overrides": 0 
-                }
-                
+            mem_stats = {
+                "gallery_size": len(memory.storage) if memory else 0,
+                "active_overrides": current_overrides_count,
+                "person_count": p_count,
+                "vehicle_count": v_count
+            }
+
             frame = annotator.draw_dashboard(frame, frame_idx, gpu_name, mem_stats)
 
             out.write(frame)
@@ -334,8 +348,8 @@ def main():
         total_time = time.time() - start_time
         print(f"\n✅ Finished processing {frames_processed} frames in {total_time:.1f}s.")
         
-        # Convert to H.264
-        if os.path.exists(temp_out) and frames_processed > 0:
+        # Convert to H.264 (only if file has content)
+        if os.path.exists(temp_out) and os.path.getsize(temp_out) > 0:
             convert_to_h264(temp_out, args.output_path)
             if os.path.exists(args.output_path):
                 os.remove(temp_out)

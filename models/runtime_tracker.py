@@ -4,8 +4,6 @@ import torch
 import einops
 from scipy.optimize import linear_sum_assignment
 
-from structures.instances import Instances
-from structures.ordered_set import OrderedSet
 from utils.misc import distributed_device
 from utils.box_ops import box_cxcywh_to_xywh
 from models.misc import get_model
@@ -63,15 +61,15 @@ class RuntimeTracker:
         self.next_id = 0
         self.id_label_to_id = {}
         
-        # --- ENHANCEMENT: Split ID Queues for Multi-Class ---
-        self.person_id_queue = OrderedSet()
-        self.vehicle_id_queue = OrderedSet()
-        # Init split queues:
-        for i in range(0, 500):
-            self.person_id_queue.add(i)
-        for i in range(500, self.num_id_vocabulary):
-            self.vehicle_id_queue.add(i)
-        # ---------------------------------------------------
+        # Calculate split point
+        self.split_idx = self.num_id_vocabulary // 2
+        
+        # --- FACTORED LOGIC: Dynamic Pools ---
+        self.person_id_pool  = list(range(0, split_idx))
+        self.vehicle_id_pool = list(range(split_idx, self.num_id_vocabulary))
+        
+        self.person_ptr  = 0
+        self.vehicle_ptr = 0
 
         # All fields are in shape (T, N, ...)
         self.trajectory_features = torch.zeros(
@@ -100,68 +98,41 @@ class RuntimeTracker:
     @torch.no_grad()
     def update(self, image):
         detr_out = self.model(frames=image, part="detr")
-
-        # We save the raw output so the external script can grab 'outputs' (embeddings)
         self.output = detr_out
 
         scores, categories, boxes, output_embeds = self._get_activate_detections(detr_out=detr_out)
+        
         if self.only_detr:
             id_pred_labels = self.num_id_vocabulary * torch.ones(boxes.shape[0], dtype=torch.int64, device=boxes.device)
         else:
             id_pred_labels = self._get_id_pred_labels(boxes=boxes, output_embeds=output_embeds, categories=categories)
-        # Filter out illegal newborn detections:
+        
+        # Newborn Filtering
         keep_idxs = (id_pred_labels != self.num_id_vocabulary) | (scores > self.newborn_thresh)
-        scores = scores[keep_idxs]
-        categories = categories[keep_idxs]
-        boxes = boxes[keep_idxs]
-        output_embeds = output_embeds[keep_idxs]
-        id_pred_labels = id_pred_labels[keep_idxs]
+        scores, categories, boxes = scores[keep_idxs], categories[keep_idxs], boxes[keep_idxs]
+        output_embeds, id_pred_labels = output_embeds[keep_idxs], id_pred_labels[keep_idxs]
 
-        # A hack implementation, before assign new id labels, update the id_queue to ensure the uniqueness of id labels:
-        n_activate_id_labels = 0
-        n_newborn_targets = 0
-        for _ in range(len(id_pred_labels)):
-            if id_pred_labels[_].item() != self.num_id_vocabulary:
-                n_activate_id_labels += 1
-                # Update correct queue based on class
-                if categories[_] == 0:
-                    self.person_id_queue.add(id_pred_labels[_].item())
-                else:
-                    self.vehicle_id_queue.add(id_pred_labels[_].item())
-            else:
-                n_newborn_targets += 1
-
-        # Assign new id labels (now class-aware):
+        # Newborn Assignment (Now uses the pointer-based method)
         id_labels = self._assign_newborn_id_labels(pred_id_labels=id_pred_labels, categories=categories)
 
-        if len(torch.unique(id_labels)) != len(id_labels):
-            print(id_labels, id_labels.shape)
-            exit(-1)
+        # Update the results with a safer "Background" fallback
+        ids_list = []
+        for l in id_labels:
+            label_val = l.item()
+            # Fallback to num_id_vocabulary (background) 
+            ids_list.append(self.id_label_to_id.get(label_val, self.num_id_vocabulary))
 
-        # Update the results:
         self.current_track_results = {
             "score": scores,
             "category": categories,
             "bbox": box_cxcywh_to_xywh(boxes) * self.bbox_unnorm,
-            "id": torch.tensor(
-                [self.id_label_to_id[_] for _ in id_labels.tolist()], dtype=torch.int64,
-            ),
+            "id": torch.tensor(ids_list, dtype=torch.int64, device=boxes.device),
             "embeddings": output_embeds 
         }
 
-        # Update id_queues:
-        for _ in range(len(id_labels)):
-            if categories[_] == 0:
-                self.person_id_queue.add(id_labels[_].item())
-            else:
-                self.vehicle_id_queue.add(id_labels[_].item())
-
-        # Update trajectory infos:
+        # Trajectory & Cleanup
         self._update_trajectory_infos(boxes=boxes, output_embeds=output_embeds, id_labels=id_labels, categories=categories)
-
-        # Filter out inactive tracks:
         self._filter_out_inactive_tracks()
-        pass
         return
 
     def get_track_results(self):
@@ -218,11 +189,13 @@ class RuntimeTracker:
             id_logits = id_logits[0, 0, 0] # (N, Vocab)
             
             # --- ENHANCEMENT: Logit Masking to enforce partitions ---
+            
             mask = torch.zeros_like(id_logits)
-            is_person = (categories == 0)
+            is_person  = (categories == 0)
             is_vehicle = (categories == 1)
-            mask[is_person, 500:] = -10000.0
-            mask[is_vehicle, :500] = -10000.0
+
+            mask[is_person ,  self.split_idx:] = -10000.0  # Block vehicle range for persons
+            mask[is_vehicle, :self.split_idx ] = -10000.0 # Block person range for vehicles
             id_logits = id_logits + mask
             # --------------------------------------------------------
 
@@ -231,6 +204,9 @@ class RuntimeTracker:
             else:
                 id_scores = id_logits.sigmoid()
                 
+            id_scores[is_person ,  self.split_idx:] = 0.0
+            id_scores[is_vehicle, :self.split_idx ] = 0.0
+
             # 5. assign id labels:
             match self.assignment_protocol:
                 case "hungarian": id_labels = self._hungarian_assignment(id_scores=id_scores)
@@ -242,49 +218,43 @@ class RuntimeTracker:
             return id_pred_labels
 
     def _assign_newborn_id_labels(self, pred_id_labels: torch.Tensor, categories: torch.Tensor):
-        # 1. handle newborns for each category separately
         newborn_mask = (pred_id_labels == self.num_id_vocabulary)
         if not newborn_mask.any():
             return pred_id_labels
 
-        # Indices of detections that need a newborn ID
         newborn_indices = newborn_mask.nonzero(as_tuple=True)[0]
+        
+        # Get pool sizes dynamically
+        p_size = len(self.person_id_pool)
+        v_size = len(self.vehicle_id_pool)
         
         for idx in newborn_indices:
             cat = categories[idx].item()
-            # 2. get available id from correct partition queue: 0-499 for Person (0), 500+ for Vehicle (1)
-            queue = self.person_id_queue if cat == 0 else self.vehicle_id_queue
             
-            if len(queue) > 0:
-                # Pop the first available ID label for this class
-                new_id_label = list(queue)[0]
-                
-                # 3. cleanup logic (remove from existing trajectory if necessary)
-                trajectory_remove_idxs = torch.zeros(
-                    self.trajectory_id_labels.shape[1], dtype=torch.bool, device=distributed_device(),
-                )
-                if self.trajectory_id_labels.shape[0] > 0:
-                    trajectory_remove_idxs |= (self.trajectory_id_labels[0] == new_id_label)
-                
-                if trajectory_remove_idxs.any():
-                    self.trajectory_features = self.trajectory_features[:, ~trajectory_remove_idxs]
-                    self.trajectory_boxes = self.trajectory_boxes[:, ~trajectory_remove_idxs]
-                    self.trajectory_id_labels = self.trajectory_id_labels[:, ~trajectory_remove_idxs]
-                    self.trajectory_category_labels = self.trajectory_category_labels[:, ~trajectory_remove_idxs]
-                    self.trajectory_times = self.trajectory_times[:, ~trajectory_remove_idxs]
-                    self.trajectory_masks = self.trajectory_masks[:, ~trajectory_remove_idxs]
+            # Select ID using the pointer and the dynamic pool size
+            if cat == 0:
+                new_id_label = self.person_id_pool[self.person_ptr % p_size]
+                self.person_ptr += 1
+            else:
+                new_id_label = self.vehicle_id_pool[self.vehicle_ptr % v_size]
+                self.vehicle_ptr += 1
+            
+            # --- Cleanup Logic: Same as original, but vectorized for safety ---
+            if self.trajectory_id_labels.shape[0] > 0:
+                # If this 'lane' (ID Label) is already active, we must purge its history
+                rem_mask = (self.trajectory_id_labels[0] == new_id_label)
+                if rem_mask.any():
+                    self.trajectory_features = self.trajectory_features[:, ~rem_mask]
+                    self.trajectory_boxes = self.trajectory_boxes[:, ~rem_mask]
+                    self.trajectory_id_labels = self.trajectory_id_labels[:, ~rem_mask]
+                    self.trajectory_category_labels = self.trajectory_category_labels[:, ~rem_mask]
+                    self.trajectory_times = self.trajectory_times[:, ~rem_mask]
+                    self.trajectory_masks = self.trajectory_masks[:, ~rem_mask]
 
-                if new_id_label in self.id_label_to_id:
-                    self.id_label_to_id.pop(new_id_label)
-                
-                # 4. assign
-                pred_id_labels[idx] = new_id_label
-                self.id_label_to_id[new_id_label] = self.next_id
-                self.next_id += 1
-                
-                # CRASH FIX: Use remove with a membership check instead of discard since OrderedSet lacks .discard()
-                if new_id_label in queue:
-                    queue.remove(new_id_label)
+            # Assign the IDs
+            self.id_label_to_id[new_id_label] = self.next_id
+            self.next_id += 1
+            pred_id_labels[idx] = new_id_label
 
         return pred_id_labels
 
