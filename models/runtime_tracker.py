@@ -139,7 +139,8 @@ class RuntimeTracker:
             "category": categories,
             "bbox": box_cxcywh_to_xywh(boxes) * self.bbox_unnorm,
             "id": torch.tensor(ids_list, dtype=torch.int64, device=boxes.device),
-            "embeddings": output_embeds 
+            "embeddings": output_embeds,
+            "id_labels" : id_labels,
         }
 
         # Trajectory & Cleanup

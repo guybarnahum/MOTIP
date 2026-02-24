@@ -268,22 +268,24 @@ def main():
             # --- A. INFERENCE ---
             tracker.update(img_norm)
             
-            # --- B. DATA EXTRACTION  ---
+            # --- B. DATA EXTRACTION (Internal Slot Mode) ---
             res = tracker.get_track_results()
 
-            # IMPORTANT: Filter out Background/Unknown IDs before sending to Memory or Annotator
-            # This prevents drawing "ID 1000" ghosts.
+            # Filter out Background/Unknown IDs
             mask = res['id'] != tracker.num_id_vocabulary
             
             # Slice once, move to CPU once
             active_res = {k: v[mask] for k, v in res.items() if isinstance(v, torch.Tensor)}
             active_res_cpu = {k: v.cpu() for k, v in active_res.items()}
 
-            valid_ids = active_res_cpu['id'].tolist() 
+            # --- CHANGE: Use internal labels for drawing ---
+            # valid_ids = active_res_cpu['id'].tolist()        <-- This was the Global ID
+            valid_ids = active_res_cpu['id_labels'].tolist() # <-- This is the Internal Slot (0-999)
+            
             valid_cats = active_res_cpu['category'].tolist()
             valid_boxes = active_res_cpu['bbox'].float().numpy()
             
-            # Keep these for ReID on original device
+            # Keep Global ID for ReID matching logic
             active_ids_gpu = active_res['id']
             active_embeds = active_res.get('embeddings')
 
