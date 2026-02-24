@@ -34,6 +34,20 @@ class Annotator:
         y_start = H - bar_h  
         text_y = H - 15      
         
+        # --- DEBUG TIER (Internal State Telemetry) ---
+        # Draw a smaller bar above the main one for pointer tracking
+        debug_h = 30
+        debug_y = y_start - debug_h
+        cv2.rectangle(frame, (0, debug_y), (W, y_start), (10, 10, 10), -1)
+        
+        ptr_p = memory_stats.get('ptr_p', -1)
+        ptr_v = memory_stats.get('ptr_v', -1)
+        nb_count = memory_stats.get('newborns', -1)
+        
+        # Pointers show the raw "index" before modulo is applied
+        debug_text = f"DEBUG >> P-PTR: {ptr_p} | V-PTR: {ptr_v} | NEWBORNS: {nb_count}"
+        cv2.putText(frame, debug_text, (15, debug_y + 20), self.font, 0.5, (0, 200, 255), 1)
+        
         # 1. Semi-transparent background bar
         overlay = frame.copy()
         cv2.rectangle(overlay, (0, y_start), (W, H), (15, 15, 15), -1)
@@ -46,8 +60,8 @@ class Annotator:
 
         # 3. Multi-Class Object Counts
         # We assume memory_stats now contains 'person_count' and 'vehicle_count'
-        p_count = memory_stats.get('person_count', 0)
-        v_count = memory_stats.get('vehicle_count', 0)
+        p_count = memory_stats.get('person_count' , -1)
+        v_count = memory_stats.get('vehicle_count', -1)
         
         # Draw People Count (Greenish)
         p_text = f"People: {p_count}"
@@ -58,8 +72,8 @@ class Annotator:
         cv2.putText(frame, v_text, (W//4 + 180, text_y), self.font, 0.6, (255, 150, 0), 2)
 
         # 4. LTM Stats
-        gal_size = memory_stats.get('gallery_size', 0)
-        active_overrides = memory_stats.get('active_overrides', 0)
+        gal_size = memory_stats.get('gallery_size', -1)
+        active_overrides = memory_stats.get('active_overrides', -1)
         
         mem_text = f"LTM: {gal_size}"
         cv2.putText(frame, mem_text, (W//2 + 150, text_y), self.font, 0.5, self.c_white, 1)
@@ -74,6 +88,7 @@ class Annotator:
         cv2.putText(frame, fr_text, (W - fw - 20, text_y), self.font, 0.6, self.c_white, 2)
         
         return frame
+
 
     def draw_tracks(self, frame, boxes, final_ids, categories, original_ids=None):
         """

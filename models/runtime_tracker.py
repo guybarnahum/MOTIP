@@ -95,6 +95,7 @@ class RuntimeTracker:
         self.current_track_results = {}
         return
 
+
     @torch.no_grad()
     def update(self, image):
         detr_out = self.model(frames=image, part="detr")
@@ -111,6 +112,17 @@ class RuntimeTracker:
         keep_idxs = (id_pred_labels != self.num_id_vocabulary) | (scores > self.newborn_thresh)
         scores, categories, boxes = scores[keep_idxs], categories[keep_idxs], boxes[keep_idxs]
         output_embeds, id_pred_labels = output_embeds[keep_idxs], id_pred_labels[keep_idxs]
+
+        # --- DEBUG TELEMETRY START ---
+        # Capture how many were predicted as newborns before assignment
+        newborn_mask = (id_pred_labels == self.num_id_vocabulary)
+        self.debug_info = {
+            "ptr_p": self.person_ptr,
+            "ptr_v": self.vehicle_ptr,
+            "newborns": newborn_mask.sum().item(),
+            "matches": (~newborn_mask).sum().item()
+        }
+        # --- DEBUG TELEMETRY END ---
 
         # Newborn Assignment (Now uses the pointer-based method)
         id_labels = self._assign_newborn_id_labels(pred_id_labels=id_pred_labels, categories=categories)

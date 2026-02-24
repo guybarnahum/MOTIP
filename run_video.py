@@ -315,12 +315,18 @@ def main():
             # Ensure we are comparing clean Python ints
             current_overrides_count = sum(1 for o, f in zip(map(int, valid_ids), map(int, final_ids)) if o != f)
             
+            # Build stats using the tracker's debug_info snapshot
             mem_stats = {
                 "gallery_size": len(memory.storage) if memory else 0,
                 "active_overrides": current_overrides_count,
                 "person_count": p_count,
-                "vehicle_count": v_count
-            }
+                "vehicle_count": v_count,
+                
+                # Pull these from the snapshot we created in tracker.update()
+                "ptr_p": tracker.debug_info["ptr_p"],
+                "ptr_v": tracker.debug_info["ptr_v"],
+                "newborns": tracker.debug_info["newborns"]
+            }       
 
             frame = annotator.draw_dashboard(frame, frame_idx, gpu_name, mem_stats)
 
