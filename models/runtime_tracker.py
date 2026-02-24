@@ -65,8 +65,8 @@ class RuntimeTracker:
         self.split_idx = self.num_id_vocabulary // 2
         
         # --- FACTORED LOGIC: Dynamic Pools ---
-        self.person_id_pool  = list(range(0, split_idx))
-        self.vehicle_id_pool = list(range(split_idx, self.num_id_vocabulary))
+        self.person_id_pool  = list(range(0, self.split_idx))
+        self.vehicle_id_pool = list(range(self.split_idx, self.num_id_vocabulary))
         
         self.person_ptr  = 0
         self.vehicle_ptr = 0
