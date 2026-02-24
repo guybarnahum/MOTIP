@@ -281,7 +281,8 @@ class RuntimeTracker:
                 self.next_id += 1
                 # The ID is removed from the queue in the update() loop's add() logic via OrderedSet uniqueness 
                 # but let's be explicit:
-                queue.discard(new_id_label)
+                if new_id_label in queue:
+                    queue.remove(new_id_label)
 
         return pred_id_labels
 
