@@ -252,11 +252,13 @@ class RuntimeTracker:
         
         for idx in newborn_indices:
             cat = categories[idx].item()
-            # 2. get available id from correct queue
+            # 2. get available id from correct partition queue: 0-499 for Person (0), 500+ for Vehicle (1)
             queue = self.person_id_queue if cat == 0 else self.vehicle_id_queue
             
             if len(queue) > 0:
+                # Pop the first available ID label for this class
                 new_id_label = list(queue)[0]
+                
                 # 3. cleanup logic (remove from existing trajectory if necessary)
                 trajectory_remove_idxs = torch.zeros(
                     self.trajectory_id_labels.shape[1], dtype=torch.bool, device=distributed_device(),
@@ -279,8 +281,8 @@ class RuntimeTracker:
                 pred_id_labels[idx] = new_id_label
                 self.id_label_to_id[new_id_label] = self.next_id
                 self.next_id += 1
-                # The ID is removed from the queue in the update() loop's add() logic via OrderedSet uniqueness 
-                # but let's be explicit:
+                
+                # CRASH FIX: Use remove with a membership check instead of discard since OrderedSet lacks .discard()
                 if new_id_label in queue:
                     queue.remove(new_id_label)
 
