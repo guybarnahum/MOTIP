@@ -41,6 +41,37 @@ def diag_log(msg: str):
         sys.stderr.flush()
 
 
+def check_gradient_stability(step, detr_norm, other_norm, max_clip_norm, metrics, accelerator):
+    """
+    Monitors gradients for stalling, saturation, or imbalance.
+    """
+    if not accelerator.is_main_process:
+        return
+
+    d_norm = detr_norm.item() if torch.is_tensor(detr_norm) else detr_norm
+    o_norm = other_norm.item() if torch.is_tensor(other_norm) else other_norm
+    
+    # 1. SATURATION (The "Explosion" Warning)
+    if d_norm > max_clip_norm * 0.98 or o_norm > max_clip_norm * 0.98:
+        print(f"\n⚡ [CLIP ALERT] Step {step}: Gradients saturated! "
+              f"DETR: {d_norm:.4f} | ID: {o_norm:.4f} (Limit: {max_clip_norm})")
+
+    # 2. STALLING (The "Amnesia" Warning)
+    # Check if ID head is moving while loss is still high
+    current_id_loss = 0
+    if 'id_loss' in metrics and len(metrics['id_loss'].deque) > 0:
+        current_id_loss = metrics['id_loss'].global_average
+        
+    if o_norm < 0.2 and current_id_loss > 10.0:
+        print(f"\n❄️  [STALL ALERT] Step {step}: ID Head is frozen! "
+              f"Norm: {o_norm:.4f} | Loss: {current_id_loss:.2f}. "
+              f"Check LR_DICTIONARY_SCALE.")
+
+    # 3. IMBALANCE (The "Backbone Dominance" Warning)
+    if d_norm > o_norm * 50 and o_norm > 0:
+        print(f"\n⚖️  [BALANCE ALERT] Step {step}: DETR is dominating ID head (Ratio: {d_norm/o_norm:.1f}x).")
+
+
 def do_id_partition_sanity_check(targets, step_idx, print_freq=50, accelerator=None):
     """
     Fixed for MOTIP Batch structure: Batch -> Time -> Dict.
@@ -676,6 +707,7 @@ def train_one_epoch(
                     # This avoids the "double unscale" error from calling accelerator.clip_grad_norm_ twice.
                     accelerator.unscale_gradients()
                     
+                    # 1. Calculate & Clip Norms
                     if separate_clip_norm:
                         detr_grad_norm = torch.nn.utils.clip_grad_norm_(detr_params, max_clip_norm)
                         other_grad_norm = torch.nn.utils.clip_grad_norm_(other_params, max_clip_norm)
@@ -683,7 +715,12 @@ def train_one_epoch(
                         # Clip all parameters together
                         detr_grad_norm = other_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_clip_norm)
                     # --- PATCH END ---
+                    
+                    # 2. RUN STABILITY SHIELD
+                    if step % logging_interval == 0:
+                        check_gradient_stability(step, detr_grad_norm, other_grad_norm, max_clip_norm, metrics, accelerator)
 
+                    # 3. Step or Skip
                     # --- STABILITY SHIELD: NaN Gradient Gate ---
                     # If gradients are NaN, skip the step to prevent weight corruption
                     if torch.isnan(detr_grad_norm) or torch.isnan(other_grad_norm):

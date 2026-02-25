@@ -36,7 +36,7 @@ LR: 2.0e-5
 LR_DROP: 5          
 LR_BACKBONE: 2.0e-6
 LR_WARMUP_EPOCHS: 1 
-LR_DICTIONARY_SCALE: 1.0
+LR_DICTIONARY_SCALE: 10.0
 
 # Sampling Strategy (Foundation Phase)
 # Shorten the temporal window to 4 frames to handle high object counts
