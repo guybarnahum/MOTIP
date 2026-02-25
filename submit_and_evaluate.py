@@ -352,13 +352,13 @@ def submit_and_evaluate_one_model(
         logger.info(f"Association Diagnostics -> DetA: {lite_res['DetA']:.2f}% | AssA: {lite_res['AssA']:.2f}%")
         
         # Per-Class Breakdown Table
-        print("\n" + "="*50)
-        print(f"{'Class ID':<10} | {'Precision':<15} | {'Recall':<15}")
-        print("-" * 50)
+        logger.info("\n" + "="*50)
+        logger.info(f"{'Class ID':<10} | {'Precision':<15} | {'Recall':<15}")
+        logger.info("-" * 50)
         for cls_id, cls_stats in lite_res["Classes"].items():
             name = "Person" if cls_id == 1 else "Vehicle" if cls_id == 2 else f"ID {cls_id}"
-            print(f"{name:<10} | {cls_stats['Prec']:>13.2f}% | {cls_stats['Rec']:>13.2f}%")
-        print("="*50 + "\n")
+            logger.info(f"{name:<10} | {cls_stats['Prec']:>13.2f}% | {cls_stats['Rec']:>13.2f}%")
+        logger.info("="*50 + "\n")
         
     return metrics
 
@@ -369,6 +369,13 @@ from models.motip import build as build_motip
 from models.misc import load_checkpoint
 from accelerate import Accelerator
 from accelerate.state import PartialState
+
+class PrintLogger:
+    """A lightweight logger that just prints to terminal."""
+    def info(self, msg): print(f"[INFO] {msg}")
+    def success(self, msg): print(f"✅ [SUCCESS] {msg}")
+    def warning(self, msg): print(f"⚠️ [WARNING] {msg}")
+    def error(self, msg): print(f"❌ [ERROR] {msg}")
 
 def main():
     parser = argparse.ArgumentParser(description="MOTIP Manual Evaluation")
@@ -386,7 +393,8 @@ def main():
     # 2. Init Environment
     accelerator = Accelerator()
     state = PartialState()
-    
+    logger = PrintLogger()
+
     # 3. Build Model & Load Checkpoint
     model, _ = build_motip(config=cfg)
     # We use a simple load here; states/optimizers aren't needed for eval
@@ -408,7 +416,7 @@ def main():
         is_evaluate=True,
         accelerator=accelerator,
         state=state,
-        logger=None,  # Function will print to terminal directly
+        logger=logger,  
         model=model,
         data_root=cfg["DATA_ROOT"],
         dataset=cfg["INFERENCE_DATASET"],
