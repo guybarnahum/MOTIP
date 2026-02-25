@@ -361,3 +361,76 @@ def submit_and_evaluate_one_model(
         print("="*50 + "\n")
         
     return metrics
+
+import argparse
+from utils.misc import yaml_to_dict
+from configs.util import load_super_config
+from models.motip import build as build_motip
+from models.misc import load_checkpoint
+from accelerate import Accelerator
+from accelerate.state import PartialState
+
+def main():
+    parser = argparse.ArgumentParser(description="MOTIP Manual Evaluation")
+    parser.add_argument("--config", type=str, required=True, help="Path to config yaml.")
+    parser.add_argument("--resume", type=str, required=True, help="Path to checkpoint .pth")
+    parser.add_argument("--det_thresh", type=float, default=0.4)
+    parser.add_argument("--id_thresh", type=float, default=0.3)
+    parser.add_argument("--output_dir", type=str, default=None, help="Custom output dir")
+    args = parser.parse_args()
+
+    # 1. Load Configs
+    cfg = yaml_to_dict(args.config)
+    cfg = load_super_config(cfg, cfg["SUPER_CONFIG_PATH"])
+    
+    # 2. Init Environment
+    accelerator = Accelerator()
+    state = PartialState()
+    
+    # 3. Build Model & Load Checkpoint
+    model, _ = build_motip(config=cfg)
+    # We use a simple load here; states/optimizers aren't needed for eval
+    load_checkpoint(model=model, path=args.resume)
+    
+    model = accelerator.prepare(model)
+    model.eval()
+
+    # 4. Resolve Output Dir
+    if args.output_dir is None:
+        # Default to a subfolder in the checkpoint directory
+        args.output_dir = os.path.join(os.path.dirname(args.resume), "manual_eval")
+
+    print(f"\n🧪 [EVAL START] Resuming from: {args.resume}")
+    print(f"🔧 Overrides -> DetThresh: {args.det_thresh} | IdThresh: {args.id_thresh}\n")
+
+    # 5. Run Evaluation
+    metrics = submit_and_evaluate_one_model(
+        is_evaluate=True,
+        accelerator=accelerator,
+        state=state,
+        logger=None,  # Function will print to terminal directly
+        model=model,
+        data_root=cfg["DATA_ROOT"],
+        dataset=cfg["INFERENCE_DATASET"],
+        data_split=cfg["INFERENCE_SPLIT"],
+        outputs_dir=args.output_dir,
+        val_config=cfg.get("val_config", None),
+        image_max_shorter=cfg.get("INFERENCE_MAX_SHORTER", 800),
+        image_max_longer=args.image_max_longer if hasattr(args, 'image_max_longer') else 1333,
+        size_divisibility=cfg.get("SIZE_DIVISIBILITY", 0),
+        use_sigmoid=cfg.get("USE_FOCAL_LOSS", False),
+        assignment_protocol=cfg.get("ASSIGNMENT_PROTOCOL", "hungarian"),
+        miss_tolerance=cfg.get("MISS_TOLERANCE", 30),
+        det_thresh=args.det_thresh,
+        newborn_thresh=args.det_thresh, # Usually matched to det_thresh
+        id_thresh=args.id_thresh,
+        area_thresh=cfg.get("AREA_THRESH", 0),
+        inference_only_detr=False,
+        dtype=cfg.get("INFERENCE_DTYPE", "FP32")
+    )
+
+    if accelerator.is_main_process:
+        print("\n✅ Evaluation Finished.")
+
+if __name__ == "__main__":
+    main()
