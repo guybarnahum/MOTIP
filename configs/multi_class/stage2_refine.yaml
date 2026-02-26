@@ -1,9 +1,8 @@
 # configs/multi_class/stage2_refine.yaml
 
 # ------------------------------------------------------------------------
-# STAGE 2: TEMPORAL REFINEMENT
-# Goal: Reduce ID Switches by increasing temporal cohesion
-# Logic: Keep 608px for VRAM safety, but double the frame window.
+# STAGE 2: TEMPORAL REFINEMENT & IDENTITY GLUE
+# Goal: Bridge the 7% Recall gap and consolidate 19,000+ IDs.
 # ------------------------------------------------------------------------
 
 SUPER_CONFIG_PATH: ./configs/r50_deformable_detr_motip_dancetrack.yaml
@@ -13,7 +12,7 @@ NUM_CLASSES: 2
 NUM_ID_VOCABULARY: 1000
 
 # Weights Initialization
-# Point to your solid Stage 1 foundation
+# Start from the best stable foundation
 DETR_PRETRAIN: ./pretrains/motip_stage1_stabilize.pth
 RESUME_OPTIMIZER: False
 RESUME_SCHEDULER: False
@@ -22,29 +21,45 @@ RESUME_SCHEDULER: False
 # Training Strategy: 8-Epoch Refinement
 # ------------------------------------------------------------------------
 EPOCHS: 8           
-LR: 1.0e-5          # Half of Stage 1 to avoid "forgetting" 99% precision
+LR: 1.0e-5          
 LR_DROP: 6          
 LR_BACKBONE: 1.0e-6
 LR_WARMUP_EPOCHS: 1 
-
-# Refined Sampling: Increase to 8 frames to solve the ID Switch problem
-sampler_lengths: [8]
-sample_intervals: [2, 3, 4] # Slightly wider intervals to see more motion
+LR_DICTIONARY_SCALE: 10.0  # High scale to keep ID gradients active
 
 # ------------------------------------------------------------------------
-# Hardware Safety (A10G Optimized)
+# LOSS REBALANCING & IDENTITY GLUE
+# ------------------------------------------------------------------------
+DETR_CLS_LOSS_COEF: 5.0    # Force the queries to find small pedestrians
+DETR_BBOX_LOSS_COEF: 5.0
+DETR_GIOU_LOSS_COEF: 2.0
+
+ID_LOSS_WEIGHT: 1.0        
+ID_TEMPERATURE: 0.07       # Crucial for InfoNCE contrastive sharpening
+USE_FOCAL_LOSS: False      # Stick to CE for better contrastive performance
+
+# ------------------------------------------------------------------------
+# Sampling: Long-term Consistency
+# ------------------------------------------------------------------------
+sampler_lengths: [8]
+sample_intervals: [2, 3, 4] 
+
+# ------------------------------------------------------------------------
+# Hardware & Memory Optimization (A10G Safe)
 # ------------------------------------------------------------------------
 BATCH_SIZE: 1
-ACCUMULATE_STEPS: 4       
-NUM_WORKERS: 2        
-USE_DECODER_CHECKPOINT: True
-PREFETCH_FACTOR: 2     
-MEMORY_EFFICIENT: True
+ACCUMULATE_STEPS: 8        # Effectively BZ=8 to stabilize gradients
+NUM_WORKERS: 1             # Reduced to save RAM/CPU-to-GPU overhead
+USE_DECODER_CHECKPOINT: True # Mandatory for 8-frame windows
+MEMORY_EFFICIENT: True      # Uses custom lightweight memory ops
+TRAIN_DTYPE: "BF16"         # Cuts VRAM usage by ~40% vs FP32
 
-# Resolve VRAM Pressure from increased sampler_length
-# We stick to 608 which proved stable in Stage 1 [cite: 52]
-AUG_MAX_SIZE: 608
-AUG_RANDOM_RESIZE: [256, 320, 384, 448, 480, 512, 544, 576, 608]
+# ------------------------------------------------------------------------
+# Resolution Strategy: 800px Features
+# ------------------------------------------------------------------------
+AUG_MAX_SIZE: 800
+AUG_RANDOM_RESIZE: [480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800]
+AUG_RANDOM_CROP_MIN: 448    # Larger crops to reduce object density per window
 
 # ------------------------------------------------------------------------
 # Validation Config (Monitor IDF1 Growth)
@@ -60,10 +75,13 @@ val_config:
     pedestrian: 1
     car: 2
 
+# ------------------------------------------------------------------------
 # Inference Settings: "Focus" Mode
-# Higher thresholds now that the model is trained
+# ------------------------------------------------------------------------
 INFERENCE_MAX_LONGER: 1333
+INFERENCE_DTYPE: "BF16"
 ASSIGNMENT_PROTOCOL: hungarian
-DET_THRESH: 0.3             # Raised from 0.1 to clean up visual noise
+# Higher thresholds now that the model is trained
+DET_THRESH: 0.3             
 NEWBORN_THRESH: 0.3         
 ID_THRESH: 0.2

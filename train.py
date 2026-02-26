@@ -183,7 +183,14 @@ def train_engine(config: dict):
         else os.path.join("./outputs/", config["EXP_NAME"])
 
     # Init Accelerator at beginning:
-    accelerator = Accelerator()
+    # Extract the dtype from your config (assuming 'config' is your loaded YAML dict)
+    
+    # Accelerate expects lowercase: "no", "fp16", or "bf16"
+    mixed_precision = config.get("DTYPE", "fp32").lower()
+    if mixed_precision == "fp32":
+        mixed_precision = "no"
+
+    accelerator = Accelerator(mixed_precision=mixed_precision)
     state = PartialState()
     # Also, we set the seed:
     set_seed(config["SEED"])

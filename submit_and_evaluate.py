@@ -246,7 +246,14 @@ def submit_and_evaluate_one_model(
 
     # 3. Setup Dataset
     inf_ds = dataset_classes[dataset](data_root=data_root, split=data_split, load_annotation=False)
-    torch_dtype = torch.float32 if dtype == "FP32" else torch.float16
+    
+    if dtype == "FP32":
+        torch_dtype = torch.float32
+    elif dtype == "BF16":
+        torch_dtype = torch.bfloat16
+    else:
+        torch_dtype = torch.float16
+
     all_seq_names = sorted(list(inf_ds.sequence_infos.keys()))
     
     # 🎲 RANDOMIZE: Shuffle with a fixed seed so all DDP processes 

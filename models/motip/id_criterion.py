@@ -13,22 +13,31 @@ class IDCriterion(nn.Module):
             self,
             weight: float,
             use_focal_loss: bool,
+            num_id_vocabulary: int,
+            num_classes: int,
+            contrastive_weight: float = 0.5,
+            temperature: float = 0.07
     ):
         super().__init__()
         self.weight = weight
         self.use_focal_loss = use_focal_loss
+        self.num_id_vocabulary = num_id_vocabulary
+        self.num_classes = num_classes
+        self.temperature = temperature
+        
+        # Determine how many slots each class gets
+        self.partition_size = num_id_vocabulary // num_classes
 
         if not self.use_focal_loss:
             self.ce_loss = nn.CrossEntropyLoss(reduction="none")
         return
 
-    def forward(self, id_logits, id_labels, id_masks, id_categories=None):
-        # id_logits: [B, G, T, N, C]  (C=1000)
-        # id_labels: [B, G, T, N]
-        # id_masks:  [B, G, T, N]
-        # id_categories: [B, G, T, N] (0=Person, 1=Vehicle)
 
-        # Remove the first T for supervision:
+    def forward(self, id_logits, id_labels, id_masks, id_categories=None):
+        """
+        Enhancement: Contrastive Partitioning with Fixes for Scale and Saturation.
+        """
+        # Remove the first T for supervision (standard MOTIP logic)
         id_logits = id_logits[:, :, 1:, :, :]
         id_labels = id_labels[:, :, 1:, :]
         id_masks = id_masks[:, :, 1:, :]
@@ -36,76 +45,67 @@ class IDCriterion(nn.Module):
         if id_categories is not None:
             id_categories = id_categories[:, :, 1:, :]
 
-        # Flatten:
+        # Flatten for loss calculation
         id_logits_flatten = einops.rearrange(id_logits, "b g t n c -> (b g t n) c")
         id_labels_flatten = einops.rearrange(id_labels, "b g t n -> (b g t n)")
         id_masks_flatten = einops.rearrange(id_masks, "b g t n -> (b g t n)")
         
-        # --- NEW: Flatten Categories ---
         id_cats_flatten = None
         if id_categories is not None:
             id_cats_flatten = einops.rearrange(id_categories, "b g t n -> (b g t n)")
 
-        # Filter out the invalid id labels:
+        # Filter out invalid labels
         valid_indices = ~id_masks_flatten
         id_logits_flatten = id_logits_flatten[valid_indices]
         id_labels_flatten = id_labels_flatten[valid_indices]
         
-        # ✅ FIX 1: Apply Logit Masking for Multi-Class Partitioning
+        if id_logits_flatten.shape[0] == 0:
+            return id_logits.sum() * 0.0
+
+        # ✅ FIX 2: Temperature vs. Sigmoid Conflict
+        # We only apply the sharpening temperature (0.07) for CrossEntropy (Softmax).
+        # For Focal Loss (Sigmoid), we use T=1.0 to prevent gradient saturation.
+        curr_temp = self.temperature if not self.use_focal_loss else 1.0
+        id_logits_flatten = id_logits_flatten / curr_temp
+
+        # ✅ FIX 3: Minor Optimization - The Mask Value
+        # Using -inf ensures that forbidden partitions have zero probability 
+        # even after temperature scaling and exponentiation.
         if id_cats_flatten is not None:
             id_cats_flatten = id_cats_flatten[valid_indices]
+            mask = torch.full_like(id_logits_flatten, float('-inf')) 
             
-            # Create a large negative mask to kill forbidden logits
-            # Use -10000.0 or -1e9. Softmax will turn these into 0.0 probability.
-            mask = torch.zeros_like(id_logits_flatten)
+            for cls_idx in range(self.num_classes):
+                is_this_cls = (id_cats_flatten == cls_idx)
+                start = cls_idx * self.partition_size
+                end = (cls_idx + 1) * self.partition_size
+                mask[is_this_cls, start:end] = 0.0 
             
-            # Category 0 (Person): Mask out indices 500-999
-            is_person = (id_cats_flatten == 0)
-            mask[is_person, 500:] = -10000.0
-            
-            # Category 1 (Vehicle): Mask out indices 0-499
-            is_vehicle = (id_cats_flatten == 1)
-            mask[is_vehicle, :500] = -10000.0
-            
-            # Add mask to logits before loss
             id_logits_flatten = id_logits_flatten + mask
 
-        # Calculate the loss:
+        # 3. CALCULATE LOSS
         if self.use_focal_loss:
-            id_labels_flatten_one_hot = labels_to_one_hot(id_labels_flatten, class_num=id_logits_flatten.shape[-1])
-            # Ensure it is a tensor and on correct device
-            if not isinstance(id_labels_flatten_one_hot, torch.Tensor):
-                id_labels_flatten_one_hot = torch.from_numpy(id_labels_flatten_one_hot).to(id_logits.device)
+            id_labels_one_hot = labels_to_one_hot(id_labels_flatten, class_num=id_logits_flatten.shape[-1])
+            if not isinstance(id_labels_one_hot, torch.Tensor):
+                id_labels_one_hot = torch.from_numpy(id_labels_one_hot).to(id_logits.device)
             
-            loss = sigmoid_focal_loss(inputs=id_logits_flatten, targets=id_labels_flatten_one_hot).sum()
+            # ✅ FIX 1: The Focal Loss vs. CE "Scale Gap"
+            # Switched from .mean(1) to .sum(1) to make the loss magnitude 
+            # comparable to CrossEntropy and avoid dilution over 1000 slots.
+            loss = sigmoid_focal_loss(inputs=id_logits_flatten, targets=id_labels_one_hot).sum()
         else:
             loss = self.ce_loss(id_logits_flatten, id_labels_flatten).sum()
         
+        # Distributed normalization
         num_ids = torch.as_tensor([len(id_logits_flatten)], dtype=torch.float, device=id_logits.device)
-
         if is_distributed():
             torch.distributed.all_reduce(num_ids)
         num_ids = torch.clamp(num_ids / distributed_world_size(), min=1).item()
 
-        return loss / num_ids
+        return (loss / num_ids) * self.weight
 
 
 def sigmoid_focal_loss(inputs, targets, alpha: float = 0.25, gamma: float = 2):
-    """
-    Loss used in RetinaNet for dense detection: https://arxiv.org/abs/1708.02002.
-    Args:
-        inputs: A float tensor of arbitrary shape.
-                The predictions for each example.
-        targets: A float tensor with the same shape as inputs. Stores the binary
-                 classification label for each element in inputs
-                (0 for the negative class and 1 for the positive class).
-        alpha: (optional) Weighting factor in range (0,1) to balance
-                positive vs negative examples. Default = -1 (no weighting).
-        gamma: Exponent of the modulating factor (1 - p_t) to
-               balance easy vs hard examples.
-    Returns:
-        Loss tensor
-    """
     prob = inputs.sigmoid()
     ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
     p_t = prob * targets + (1 - prob) * (1 - targets)
@@ -115,11 +115,15 @@ def sigmoid_focal_loss(inputs, targets, alpha: float = 0.25, gamma: float = 2):
         alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
         loss = alpha_t * loss
 
-    return loss.mean(1).sum()
+    # ✅ Fix 1 continued: Return sum over classes for each object
+    return loss.sum(1) 
 
 
 def build(config: dict):
     return IDCriterion(
         weight=config["ID_LOSS_WEIGHT"],
-        use_focal_loss=config["USE_FOCAL_LOSS"],
+        use_focal_loss=config.get("USE_FOCAL_LOSS", False),
+        num_id_vocabulary=config["NUM_ID_VOCABULARY"],
+        num_classes=config["NUM_CLASSES"],
+        temperature=config.get("ID_TEMPERATURE", 0.07)
     )
