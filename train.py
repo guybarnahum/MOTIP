@@ -74,8 +74,8 @@ def check_gradient_stability(step, detr_norm, other_norm, max_clip_norm, metrics
 
 def do_id_partition_sanity_check(targets, step_idx, print_freq=50, accelerator=None):
     """
-    Fixed for MOTIP Batch structure: Batch -> Time -> Dict.
-    Uses 'id' and 'category' keys as defined in DanceTrack/collate_fn.
+    REFINED FOR MODULO STRATEGY:
+    Now allows IDs > 500 while enforcing physical memory limits (Vocabulary Size).
     """
     is_main = accelerator.is_main_process if accelerator is not None else True
     if step_idx % print_freq != 0 or not is_main:
@@ -85,47 +85,41 @@ def do_id_partition_sanity_check(targets, step_idx, print_freq=50, accelerator=N
     error_msg = ""
     total_p_count = 0
     total_v_count = 0
+    # Newborn ID index is exactly the vocabulary size
+    VOCAB_LIMIT = 1000 
 
     print(f"\n🔍 [INTEGRITY CHECK] Step {step_idx}:")
 
     # targets is Batch -> Time -> Dict
     for b_idx, clip in enumerate(targets):
         for t_idx, frame in enumerate(clip):
-            # 1. Access the correct keys from your DanceTrack dataset
-            ids = frame['id']        # Ground Truth IDs
+            ids = frame['id']        
             cats = frame['category']  # 0=Person, 1=Vehicle
             
-            # 2. Filter out Padding (-1) and newborn ID before checking
-            # Your collate_fn uses -1 for padding; we must ignore these.
-            valid_mask = (ids >= 0) & (ids < 1000) 
+            # 1. Filter out Padding (-1)
+            valid_mask = (ids >= 0)
             if not valid_mask.any():
                 continue
             
             v_ids = ids[valid_mask]
             v_cats = cats[valid_mask]
 
-            # 3. Update Density Counters
+            # 2. Update Density Counters
             total_p_count += (v_cats == 0).sum().item()
             total_v_count += (v_cats == 1).sum().item()
 
-            # 4. Hard Boundary Verification
-            # --- PERSON CHECK (Category 0) ---
-            person_mask = (v_cats == 0)
-            if person_mask.any():
-                p_max = v_ids[person_mask].max().item()
-                if p_max >= 500:
-                    error_msg = f"FATAL: Person ID {p_max} >= 500 at Step {step_idx} (BatchItem {b_idx}, Frame {t_idx})!"
-                    integrity_failure = True
-                    break
+            # 3. Hard Physical Boundary Verification
+            # Even with Modulo, an ID must not exceed the VOCAB_LIMIT (1000)
+            # as that index represents the "Newborn" slot. Anything higher is a CUDA crash.
+            if v_ids.max().item() > VOCAB_LIMIT:
+                error_msg = (f"FATAL: ID {v_ids.max().item()} exceeds Vocabulary Limit {VOCAB_LIMIT} "
+                             f"at Step {step_idx} (BatchItem {b_idx}, Frame {t_idx})!")
+                integrity_failure = True
+                break
 
-            # --- VEHICLE CHECK (Category 1) ---
-            vehicle_mask = (v_cats == 1)
-            if vehicle_mask.any():
-                v_min = v_ids[vehicle_mask].min().item()
-                if v_min < 500:
-                    error_msg = f"FATAL: Vehicle ID {v_min} < 500 at Step {step_idx} (BatchItem {b_idx}, Frame {t_idx})!"
-                    integrity_failure = True
-                    break
+            # 4. Modulo Safety Logic (Informational Only)
+            # With modulo enabled in Criterion/Decoder, IDs >= 500 for People
+            # are now mathematically safe updates.
         
         if integrity_failure:
             break
@@ -134,7 +128,7 @@ def do_id_partition_sanity_check(targets, step_idx, print_freq=50, accelerator=N
         print("\n" + "!"*80)
         print(f"🛑 DATA INTEGRITY CIRCUIT BREAKER TRIGGERED")
         print(error_msg)
-        print("Stopping training immediately to prevent model corruption.")
+        print("Stopping training immediately to prevent a Device-Side Assert crash.")
         print("!"*80 + "\n")
         sys.exit(1)
 
@@ -143,7 +137,7 @@ def do_id_partition_sanity_check(targets, step_idx, print_freq=50, accelerator=N
     if total_p_count == 0 and total_v_count == 0:
         print("   ⚠️  WARNING: This batch contains ZERO labeled objects!")
     else:
-        print(f"   ✅ All IDs within strict 500/500 partitions.")
+        print(f"   ✅ All IDs within physical range [0, {VOCAB_LIMIT}]. Modulo Mapping Active.")
 
 
 def extract_metrics_safely(train_metrics: Metrics):
@@ -968,51 +962,70 @@ def tensor_dict_index_select(tensor_dict, index, dim=0):
 
 
 def prepare_for_motip(detr_outputs, annotations, detr_indices):
+    """
+    Enhanced to support Multi-Class Modulo Partitioning.
+    Extracts visual features from DETR and maps them to trajectory/unknown slots.
+    """
     _B, _T = len(annotations), len(annotations[0])
     _G, _, _N = annotations[0][0]["trajectory_id_labels"].shape
     _device = detr_outputs["pred_logits"].device
     _feature_dim = detr_outputs["outputs"].shape[-1]
-    # Init corresponding variables:
+
+    # Initialize storage tensors
+    # trajectory: The history/past of the tracks
     trajectory_id_labels = - torch.ones((_B, _G, _T, _N), dtype=torch.int64, device=_device)
     trajectory_class_labels = - torch.ones((_B, _G, _T, _N), dtype=torch.int64, device=_device)
     trajectory_times = - torch.ones((_B, _G, _T, _N), dtype=torch.int64, device=_device)
     trajectory_masks = torch.ones((_B, _G, _T, _N), dtype=torch.bool, device=_device)
     trajectory_boxes = torch.zeros((_B, _G, _T, _N, 4), dtype=torch.float32, device=_device)
     trajectory_features = torch.zeros((_B, _G, _T, _N, _feature_dim), dtype=torch.float32, device=_device)
+
+    # unknown: The current/new detections being matched
     unknown_id_labels = - torch.ones((_B, _G, _T, _N), dtype=torch.int64, device=_device)
     unknown_class_labels = - torch.ones((_B, _G, _T, _N), dtype=torch.int64, device=_device)
     unknown_times = - torch.ones((_B, _G, _T, _N), dtype=torch.int64, device=_device)
     unknown_masks = torch.ones((_B, _G, _T, _N), dtype=torch.bool, device=_device)
     unknown_boxes = torch.zeros((_B, _G, _T, _N, 4), dtype=torch.float32, device=_device)
     unknown_features = torch.zeros((_B, _G, _T, _N, _feature_dim), dtype=torch.float32, device=_device)
+
     for b in range(_B):
         for t in range(_T):
             flatten_idx = b * _T + t
+            # Align DETR predictions with ground truth indices
             go_back_detr_idxs = torch.argsort(detr_indices[flatten_idx][1])
             detr_output_embeds = detr_outputs["outputs"][flatten_idx][detr_indices[flatten_idx][0][go_back_detr_idxs]]
             detr_boxes = detr_outputs["pred_boxes"][flatten_idx][detr_indices[flatten_idx][0][go_back_detr_idxs]]
-            # detr_output_embeds = einops.repeat(detr_output_embeds, "n d -> g n d", g=_G)
-            # detr_boxes = einops.repeat(detr_boxes, "n d -> g n d", g=_G)
+
             for group in range(_G):
                 _curr_traj_ann_idxs = annotations[b][t]["trajectory_ann_idxs"][group, 0, :]
                 _curr_unk_ann_idxs = annotations[b][t]["unknown_ann_idxs"][group, 0, :]
                 _curr_traj_masks = annotations[b][t]["trajectory_id_masks"][group, 0, :]
                 _curr_unk_masks = annotations[b][t]["unknown_id_masks"][group, 0, :]
-                # Fill the fields:
+
+                # 1. Fill Identity and Class Labels
+                # These are used by the IDDecoder.id_label_to_embed modulo logic
                 trajectory_id_labels[b, group, t] = annotations[b][t]["trajectory_id_labels"][group, 0, :]
                 trajectory_class_labels[b, group, t] = annotations[b][t]["trajectory_class_labels"][group, 0, :]
+                
                 unknown_id_labels[b, group, t] = annotations[b][t]["unknown_id_labels"][group, 0, :]
                 unknown_class_labels[b, group, t] = annotations[b][t]["unknown_class_labels"][group, 0, :]
+
+                # 2. Fill Timing and Masking
                 trajectory_times[b, group, t] = annotations[b][t]["trajectory_times"][group, 0, :]
                 unknown_times[b, group, t] = annotations[b][t]["unknown_times"][group, 0, :]
                 trajectory_masks[b, group, t] = _curr_traj_masks
                 unknown_masks[b, group, t] = _curr_unk_masks
-                trajectory_features[b, group, t, ~_curr_traj_masks] = detr_output_embeds[_curr_traj_ann_idxs[~_curr_traj_masks]]
-                unknown_features[b, group, t, ~_curr_unk_masks] = detr_output_embeds[_curr_unk_ann_idxs[~_curr_unk_masks]]
-                trajectory_boxes[b, group, t, ~_curr_traj_masks] = detr_boxes[_curr_traj_ann_idxs[~_curr_traj_masks]]
-                unknown_boxes[b, group, t, ~_curr_unk_masks] = detr_boxes[_curr_unk_ann_idxs[~_curr_unk_masks]]
-                pass
-            pass
+
+                # 3. Map Visual Features and Boxes
+                # We only fill indices where mask is False (valid object)
+                if (~_curr_traj_masks).any():
+                    trajectory_features[b, group, t, ~_curr_traj_masks] = detr_output_embeds[_curr_traj_ann_idxs[~_curr_traj_masks]]
+                    trajectory_boxes[b, group, t, ~_curr_traj_masks] = detr_boxes[_curr_traj_ann_idxs[~_curr_traj_masks]]
+                
+                if (~_curr_unk_masks).any():
+                    unknown_features[b, group, t, ~_curr_unk_masks] = detr_output_embeds[_curr_unk_ann_idxs[~_curr_unk_masks]]
+                    unknown_boxes[b, group, t, ~_curr_unk_masks] = detr_boxes[_curr_unk_ann_idxs[~_curr_unk_masks]]
+
     return {
         "trajectory_id_labels": trajectory_id_labels,
         "trajectory_class_labels": trajectory_class_labels,

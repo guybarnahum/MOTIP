@@ -29,7 +29,9 @@ class IDCriterion(nn.Module):
         # Diagnostics
         self.step_count = 0
 
+
     def forward(self, id_logits, id_labels, id_masks, id_categories=None):
+        # 1. PREPARE TENSORS (Standard MOTIP logic)
         id_logits = id_logits[:, :, 1:, :, :]
         id_labels = id_labels[:, :, 1:, :]
         id_masks = id_masks[:, :, 1:, :]
@@ -52,19 +54,29 @@ class IDCriterion(nn.Module):
         if id_logits_flatten.shape[0] == 0:
             return id_logits.sum() * 0.0
 
+        # 2. TEMPERATURE SCALING
         curr_temp = self.temperature if not self.use_focal_loss else 1.0
         id_logits_flatten = id_logits_flatten / curr_temp
 
+        # 3. MULTI-CLASS MODULO MAPPING & MASKING
         if id_cats_flatten is not None:
             id_cats_flatten = id_cats_flatten[valid_indices]
-            
-            # --- FIX 1: REVERT OFFSET (Data is already 0/1) ---
-            norm_id_cats = id_cats_flatten 
+            norm_id_cats = id_cats_flatten # Data is 0/1, no offset needed
 
+            # --- FIX 1: ID MODULO MAPPING ---
+            # This handles IDs > 500 by wrapping them into the class partition.
+            # Newborn (ID 1000) is kept as is.
+            newborn_mask = (id_labels_flatten == self.num_id_vocabulary)
+            id_labels_flatten = torch.where(
+                newborn_mask,
+                id_labels_flatten,
+                (id_labels_flatten % self.partition_size) + (norm_id_cats * self.partition_size)
+            )
+
+            # --- FIX 2: APPLY PARTITION MASK ---
             mask = torch.full_like(id_logits_flatten, -10000.0) 
             
-            # --- FIX 2: PROTECT NEWBORN SLOT ---
-            # Index 1000 (num_id_vocabulary) must always be 0.0 so it's never masked
+            # Protect Newborn Slot: Index 1000 is always allowed for everyone
             if id_logits_flatten.shape[-1] > self.num_id_vocabulary:
                 mask[:, self.num_id_vocabulary] = 0.0
 
@@ -74,23 +86,18 @@ class IDCriterion(nn.Module):
                 end = (cls_idx + 1) * self.partition_size
                 mask[is_this_cls, start:end] = 0.0 
             
-            # --- 🛡️ EMERGENCY PROBE: CHECK IF TARGET IS MASKED ---
-            # Extract the mask value at the actual ground-truth label position
+            # --- 🛡️ DIAGNOSTIC PROBE (Retention Recommended) ---
+            # Check if the target label is safe after modulo mapping
             target_mask_check = mask[torch.arange(len(id_labels_flatten)), id_labels_flatten]
-            masked_targets = (target_mask_check < -1.0)
-            
-            if masked_targets.any():
-                bad_idx = torch.where(masked_targets)[0][0]
-                print(f"\n🔥 [CRITICAL] MASKING EXPLOSION AT STEP {self.step_count if hasattr(self, 'step_count') else '?'}")
-                print(f"   ∟ Dataset Category: {id_cats_flatten[bad_idx].item()}")
-                print(f"   ∟ Normalized Category: {norm_id_cats[bad_idx].item()}")
-                print(f"   ∟ Ground Truth ID: {id_labels_flatten[bad_idx].item()}")
-                print(f"   ∟ Partition Limit: {norm_id_cats[bad_idx].item() * self.partition_size} to {(norm_id_cats[bad_idx].item() + 1) * self.partition_size}")
-                print(f"   ∟ Result: Target is currently MASKED OUT (-10000). CE Loss will explode.")
-            # ----------------------------------------------------
+            if (target_mask_check < -1.0).any():
+                bad_idx = torch.where(target_mask_check < -1.0)[0][0]
+                print(f"\n🔥 [CRITICAL] MODULO FAILURE AT STEP {getattr(self, 'step_count', '?')}")
+                print(f"   ∟ Class: {norm_id_cats[bad_idx].item()} | Mapped ID: {id_labels_flatten[bad_idx].item()}")
+                print(f"   ∟ Result: Target is STILL MASKED. CE Loss will explode.")
             
             id_logits_flatten = id_logits_flatten + mask
 
+        # 4. CALCULATE FINAL LOSS
         if self.use_focal_loss:
             id_labels_one_hot = labels_to_one_hot(id_labels_flatten, class_num=id_logits_flatten.shape[-1])
             if not isinstance(id_labels_one_hot, torch.Tensor):
@@ -99,14 +106,16 @@ class IDCriterion(nn.Module):
         else:
             loss = self.ce_loss(id_logits_flatten, id_labels_flatten).sum()
         
-        # --- ROBUST NORMALIZATION ---
+        # 5. ROBUST NORMALIZATION
         num_ids = torch.tensor(id_logits_flatten.shape[0], dtype=torch.float, device=id_logits.device)
         if is_distributed():
             torch.distributed.all_reduce(num_ids)
             num_ids = num_ids / distributed_world_size()
 
         num_ids = torch.clamp(num_ids, min=1.0)
-        self.step_count += 1
+        
+        if hasattr(self, 'step_count'):
+            self.step_count += 1
 
         return (loss / num_ids) * self.weight
 

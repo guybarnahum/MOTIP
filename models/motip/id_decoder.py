@@ -95,13 +95,14 @@ class IDDecoder(nn.Module):
 
         pass
     
+    
     def forward(self, seq_info, use_decoder_checkpoint):
         trajectory_features = seq_info["trajectory_features"]
         unknown_features = seq_info["unknown_features"]
         trajectory_id_labels = seq_info["trajectory_id_labels"]
         unknown_id_labels = seq_info["unknown_id_labels"] if "unknown_id_labels" in seq_info else None
         
-        # Multi-class support: extract class labels for gating
+        # Categories are already 0 (Person) and 1 (Vehicle) from DanceTrack loader
         trajectory_class_labels = seq_info["trajectory_class_labels"]
         unknown_class_labels = seq_info["unknown_class_labels"]
 
@@ -109,40 +110,31 @@ class IDDecoder(nn.Module):
         unknown_times = seq_info["unknown_times"]
         trajectory_masks = seq_info["trajectory_masks"]
         unknown_masks = seq_info["unknown_masks"]
+        
         _B, _G, _T, _N, _ = trajectory_features.shape
         _curr_B, _curr_G, _curr_T, _curr_N, _ = unknown_features.shape
 
-        # --- 🛡️ ID RANGE ASSET CHECK ---
-        if self.training:
-            valid_traj_mask = (trajectory_id_labels != -1)
-            if valid_traj_mask.any():
-                max_traj_id = trajectory_id_labels[valid_traj_mask].max().item()
-                if max_traj_id >= self.num_id_vocabulary:
-                    print(f"🔥 [CRITICAL] Traj ID {max_traj_id} exceeds vocab {self.num_id_vocabulary}")
-
-            if unknown_id_labels is not None:
-                valid_unk_mask = (unknown_id_labels != -1)
-                if valid_unk_mask.any():
-                    max_unk_id = unknown_id_labels[valid_unk_mask].max().item()
-                    if max_unk_id >= self.num_id_vocabulary:
-                        print(f"🔥 [CRITICAL] Unknown ID {max_unk_id} exceeds vocab {self.num_id_vocabulary}")
-
-        trajectory_id_embeds = self.id_label_to_embed(id_labels=trajectory_id_labels)
+        # --- 1. ID EMBEDDING INITIALIZATION (With Modulo Sync) ---
+        trajectory_id_embeds = self.id_label_to_embed(
+            id_labels=trajectory_id_labels, 
+            class_labels=trajectory_class_labels
+        )
         unknown_id_embeds = self.generate_empty_id_embed(unknown_features=unknown_features)
 
         trajectory_embeds = torch.cat([trajectory_features, trajectory_id_embeds], dim=-1)
         unknown_embeds = torch.cat([unknown_features, unknown_id_embeds], dim=-1)
 
-        # Prepare some common variables:
+        # --- 2. ATTENTION MASKING & RELATIVE PE SAFETY ---
         self_attn_key_padding_mask = einops.rearrange(unknown_masks, "b g t n -> (b g t) n").contiguous()
         cross_attn_key_padding_mask = einops.rearrange(trajectory_masks, "b g t n -> (b g) (t n)").contiguous()
+        
         _trajectory_times_flatten = einops.rearrange(trajectory_times, "b g t n -> (b g) (t n)")
         _unknown_times_flatten = einops.rearrange(unknown_times, "b g t n -> (b g) (t n)")
         
-        # Temporal Cross-Attn Mask
+        # Temporal Gating
         cross_attn_mask = _trajectory_times_flatten[:, None, :] >= _unknown_times_flatten[:, :, None]
 
-        # --- MULTI-CLASS GATING LOGIC ---
+        # Multi-Class Gating (Block cross-talk between classes)
         _traj_cls_flatten = einops.rearrange(trajectory_class_labels, "b g t n -> (b g) (t n)")
         _unk_cls_flatten = einops.rearrange(unknown_class_labels, "b g t n -> (b g) (t n)")
         class_mismatch_mask = _unk_cls_flatten[:, :, None] != _traj_cls_flatten[:, None, :]
@@ -150,96 +142,69 @@ class IDDecoder(nn.Module):
 
         cross_attn_mask = einops.repeat(cross_attn_mask, "bg tn1 tn2 -> (bg n_heads) tn1 tn2", n_heads=self.n_heads).contiguous()
         
-        # --- FIX 1: DYNAMIC RELATIVE POSITION INDEXING (A10G Crash Fix) ---
+        # FIX: Clamp Relative PE to prevent Index-Out-of-Bounds crashes
         rel_dist = _unknown_times_flatten[:, :, None] - _trajectory_times_flatten[:, None, :]
         rel_pe_idxs = rel_dist + (self.rel_pe_length // 2)
-        # Prevent "Index Out of Bounds" for the 44-frame span
         rel_pe_idxs = torch.clamp(rel_pe_idxs, 0, self.rel_pe_length - 1).long()
 
-        # Change Cross-Attn key_padding_mask and attn_mask to float:
+        # Convert masks to float values for attention layers
         cross_attn_key_padding_mask = torch.masked_fill(
-            cross_attn_key_padding_mask.float(),
-            mask=cross_attn_key_padding_mask,
-            value=float("-inf"),
+            cross_attn_key_padding_mask.float(), mask=cross_attn_key_padding_mask, value=float("-inf")
         ).to(self.dtype)
+        
         cross_attn_mask = torch.masked_fill(
-            cross_attn_mask.float(),
-            mask=cross_attn_mask,
-            value=float("-inf"),
+            cross_attn_mask.float(), mask=cross_attn_mask, value=float("-inf")
         ).to(self.dtype)
 
+        # --- 3. LAYER REFINEMENT LOOP ---
         all_unknown_id_logits = None
         all_unknown_id_labels = None
         all_unknown_id_masks = None
 
-        # Determine partition size dynamically
-        partition_size = self.num_id_vocabulary // 2
-
         for layer in range(self.num_layers):
             if use_decoder_checkpoint:
-                unknown_embeds = checkpoint(
-                    self._forward_a_layer,
-                    layer, unknown_embeds, trajectory_embeds,
-                    self_attn_key_padding_mask, cross_attn_key_padding_mask,
-                    cross_attn_mask, rel_pe_idxs,
-                    use_reentrant=False,
-                )
+                unknown_embeds = checkpoint(self._forward_a_layer, layer, unknown_embeds, trajectory_embeds,
+                    self_attn_key_padding_mask, cross_attn_key_padding_mask, cross_attn_mask, rel_pe_idxs, use_reentrant=False)
             else:
-                unknown_embeds = self._forward_a_layer(
-                    layer=layer, unknown_embeds=unknown_embeds, trajectory_embeds=trajectory_embeds,
-                    self_attn_key_padding_mask=self_attn_key_padding_mask,
-                    cross_attn_key_padding_mask=cross_attn_key_padding_mask,
-                    cross_attn_mask=cross_attn_mask, rel_pe_idx=rel_pe_idxs,
-                )
+                unknown_embeds = self._forward_a_layer(layer=layer, unknown_embeds=unknown_embeds, trajectory_embeds=trajectory_embeds,
+                    self_attn_key_padding_mask=self_attn_key_padding_mask, cross_attn_key_padding_mask=cross_attn_key_padding_mask,
+                    cross_attn_mask=cross_attn_mask, rel_pe_idx=rel_pe_idxs)
 
             _unknown_id_logits = self.embed_to_word_layers[layer](unknown_embeds[..., -self.id_dim:])
 
-            # --- FIX 2: CLASS OFFSET & DYNAMIC PARTITIONING ---
-            norm_unk_cats = unknown_class_labels
-            person_mask = (norm_unk_cats == 0).unsqueeze(-1)
-            car_mask = (norm_unk_cats == 1).unsqueeze(-1)
+            # --- 4. MULTI-CLASS PARTITION MASKING (Modulo Aware) ---
+            # Partitions: 0-499 (Person), 500-999 (Vehicle). Index 1000 (Newborn) is always open.
+            person_mask = (unknown_class_labels == 0).unsqueeze(-1)
+            car_mask = (unknown_class_labels == 1).unsqueeze(-1)
             
-            p_start, p_end = 0 * partition_size, 1 * partition_size
-            v_start, v_end = 1 * partition_size, 2 * partition_size
-
-            # Using -10000.0 for stability in BF16
+            p_start, p_end = 0, self.partition_size
+            v_start, v_end = self.partition_size, self.num_id_vocabulary
+            
             inf_val = torch.tensor(-10000.0, device=unknown_embeds.device, dtype=_unknown_id_logits.dtype)
 
-            # --- 🕵️‍♂️ FORENSIC DIAGNOSTIC: Target Masking Verification ---
-            if self.training and unknown_id_labels is not None:
-                # Flat check for targets falling in forbidden zones
-                flat_labels = unknown_id_labels.view(-1)
-                flat_cats = norm_unk_cats.view(-1)
-                valid_flat = flat_labels != -1
-                
-                if valid_flat.any():
-                    check_labels = flat_labels[valid_flat]
-                    check_cats = flat_cats[valid_flat]
-                    
-                    # Check: Person (cat 0) must be < partition_size
-                    p_violation = (check_cats == 0) & (check_labels >= partition_size)
-                    # Check: Vehicle (cat 1) must be >= partition_size
-                    v_violation = (check_cats == 1) & (check_labels < partition_size)
-                    
-                    if p_violation.any() or v_violation.any():
-                        print(f"\n🚨 [MELTDOWN ORIGIN] Target ID Mismatch in Layer {layer}!")
-                        if p_violation.any():
-                            print(f"   ∟ Person with ID {check_labels[p_violation][0].item()} (Limit: <{partition_size})")
-                        if v_violation.any():
-                            print(f"   ∟ Vehicle with ID {check_labels[v_violation][0].item()} (Limit: >={partition_size})")
-                        print(f"   ∟ Logic: This target will be masked to -10000, causing loss to explode.")
-
-            # Mask out forbidden ranges
+            # Block Forbidden zones. Newborn (1000) is excluded from these slices.
             _unknown_id_logits[..., v_start:v_end] = torch.where(person_mask, inf_val, _unknown_id_logits[..., v_start:v_end])
             _unknown_id_logits[..., p_start:p_end] = torch.where(car_mask, inf_val, _unknown_id_logits[..., p_start:p_end])
-            # --------------------------------------------------
+
+            # --- FORENSIC CHECK (Keep for verification) ---
+            if self.training and unknown_id_labels is not None:
+                flat_labels = unknown_id_labels.view(-1)
+                flat_cats = unknown_class_labels.view(-1)
+                valid_flat = (flat_labels != -1) & (flat_labels != self.num_id_vocabulary)
+                if valid_flat.any():
+                    # Calculate mapped IDs to check for out-of-range violations
+                    mapped_labels = (flat_labels[valid_flat] % self.partition_size) + (flat_cats[valid_flat] * self.partition_size)
+                    p_bad = (flat_cats[valid_flat] == 0) & (mapped_labels >= self.partition_size)
+                    v_bad = (flat_cats[valid_flat] == 1) & (mapped_labels < self.partition_size)
+                    if p_bad.any() or v_bad.any():
+                        print(f"🔥 [CRITICAL] Modulo mapping error in Layer {layer}!")
+            # -----------------------------------------------
 
             _unknown_id_masks = unknown_masks.clone()
             _unknown_id_labels = None if not self.training else unknown_id_labels
+            
             if all_unknown_id_logits is None:
-                all_unknown_id_logits = _unknown_id_logits
-                all_unknown_id_labels = _unknown_id_labels
-                all_unknown_id_masks = _unknown_id_masks
+                all_unknown_id_logits, all_unknown_id_labels, all_unknown_id_masks = _unknown_id_logits, _unknown_id_labels, _unknown_id_masks
             else:
                 all_unknown_id_logits = torch.cat([all_unknown_id_logits, _unknown_id_logits], dim=0)
                 all_unknown_id_labels = torch.cat([all_unknown_id_labels, _unknown_id_labels], dim=0) if _unknown_id_labels is not None else None
@@ -247,9 +212,8 @@ class IDDecoder(nn.Module):
 
         if self.training and self.use_aux_loss:
             return all_unknown_id_logits, all_unknown_id_labels, all_unknown_id_masks
-        else:
-            return _unknown_id_logits, _unknown_id_labels, _unknown_id_masks
-
+        return _unknown_id_logits, _unknown_id_labels, _unknown_id_masks
+    
 
     def _forward_a_layer(
             self,
@@ -296,7 +260,23 @@ class IDDecoder(nn.Module):
         return unknown_embeds
     
 
-    def id_label_to_embed(self, id_labels):
+    def id_label_to_embed(self, id_labels, class_labels=None):
+        """
+        Modified to support Modulo Partitioning.
+        Ensures IDs fit within the 1000-slot vocabulary based on class.
+        """
+        if class_labels is not None:
+            # Protect the Newborn ID (index 1000)
+            newborn_mask = (id_labels == self.num_id_vocabulary)
+            
+            # Map IDs: (id % 500) + (0 or 500)
+            # This handles IDs like 1000+ or 500+ for people correctly.
+            id_labels = torch.where(
+                newborn_mask,
+                id_labels,
+                (id_labels % self.partition_size) + (class_labels * self.partition_size)
+            )
+
         id_words = label_to_one_hot(id_labels, self.num_id_vocabulary + 1, dtype=self.dtype)
         id_embeds = self.word_to_embed(id_words)
         return id_embeds
