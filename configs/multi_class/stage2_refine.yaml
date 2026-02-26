@@ -35,21 +35,21 @@ DETR_BBOX_LOSS_COEF: 5.0
 DETR_GIOU_LOSS_COEF: 2.0
 
 ID_LOSS_WEIGHT: 1.0        
-ID_TEMPERATURE: 0.07       # Crucial for InfoNCE contrastive sharpening
+ID_TEMPERATURE: 0.05       # Crucial for InfoNCE contrastive sharpening
 USE_FOCAL_LOSS: False      # Stick to CE for better contrastive performance
 
 # ------------------------------------------------------------------------
 # Sampling: Long-term Consistency
 # ------------------------------------------------------------------------
-sampler_lengths: [8]
-sample_intervals: [2, 3, 4] 
+sampler_lengths: [12]
+sample_intervals: [1,2, 3] 
 
 # ------------------------------------------------------------------------
 # Hardware & Memory Optimization (A10G Safe)
 # ------------------------------------------------------------------------
 BATCH_SIZE: 1
-ACCUMULATE_STEPS: 8        # Effectively BZ=8 to stabilize gradients
-NUM_WORKERS: 1             # Reduced to save RAM/CPU-to-GPU overhead
+ACCUMULATE_STEPS: 16        # stabilize gradients
+NUM_WORKERS: 1              # Reduced to save RAM/CPU-to-GPU overhead
 USE_DECODER_CHECKPOINT: True # Mandatory for 8-frame windows
 MEMORY_EFFICIENT: True      # Uses custom lightweight memory ops
 TRAIN_DTYPE: "BF16"         # Cuts VRAM usage by ~40% vs FP32
@@ -57,9 +57,12 @@ TRAIN_DTYPE: "BF16"         # Cuts VRAM usage by ~40% vs FP32
 # ------------------------------------------------------------------------
 # Resolution Strategy: 800px Features
 # ------------------------------------------------------------------------
-AUG_MAX_SIZE: 800
-AUG_RANDOM_RESIZE: [480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800]
-AUG_RANDOM_CROP_MIN: 448    # Larger crops to reduce object density per window
+# AUG_MAX_SIZE: 800
+# AUG_RANDOM_RESIZE: [480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800]
+AUG_MAX_SIZE: 1024  
+AUG_RANDOM_RESIZE: [640, 704, 768, 832, 896, 960, 1024]
+AUG_RANDOM_CROP_MIN: 512    # Safety floor for A10G VRAM
+AUG_RANDOM_CROP_MAX: 800    # Prevent the crop from taking the whole 1024px image
 
 # ------------------------------------------------------------------------
 # Validation Config (Monitor IDF1 Growth)
@@ -82,6 +85,7 @@ INFERENCE_MAX_LONGER: 1333
 INFERENCE_DTYPE: "BF16"
 ASSIGNMENT_PROTOCOL: hungarian
 # Higher thresholds now that the model is trained
+MISS_TOLERANCE: 60 # Allow 2 seconds of occlusion (at 30fps)
 DET_THRESH: 0.3             
 NEWBORN_THRESH: 0.3         
 ID_THRESH: 0.2
