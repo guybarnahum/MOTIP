@@ -32,6 +32,8 @@ class IDDecoder(nn.Module):
         self.head_dim = head_dim
         self.n_heads = (self.feature_dim + self.id_dim) // self.head_dim
         self.num_id_vocabulary = num_id_vocabulary
+        self.num_classes = 2 # Usually passed or inferred
+        self.partition_size = self.num_id_vocabulary // self.num_classes
         self.rel_pe_length = rel_pe_length
 
         self.use_aux_loss = use_aux_loss
@@ -92,7 +94,7 @@ class IDDecoder(nn.Module):
                 nn.init.xavier_uniform_(p)
 
         pass
-
+    
     def forward(self, seq_info, use_decoder_checkpoint):
         trajectory_features = seq_info["trajectory_features"]
         unknown_features = seq_info["unknown_features"]
@@ -111,7 +113,6 @@ class IDDecoder(nn.Module):
         _curr_B, _curr_G, _curr_T, _curr_N, _ = unknown_features.shape
 
         # --- ID RANGE ASSET CHECK ---
-        # Allow ID up to num_id_vocabulary (the Newborn ID index).
         if self.training:
             valid_traj_mask = (trajectory_id_labels != -1)
             if valid_traj_mask.any():
@@ -145,24 +146,19 @@ class IDDecoder(nn.Module):
         # --- MULTI-CLASS GATING LOGIC ---
         _traj_cls_flatten = einops.rearrange(trajectory_class_labels, "b g t n -> (b g) (t n)")
         _unk_cls_flatten = einops.rearrange(unknown_class_labels, "b g t n -> (b g) (t n)")
-        # Block if classes are different (Infinity Cost)
         class_mismatch_mask = _unk_cls_flatten[:, :, None] != _traj_cls_flatten[:, None, :]
         cross_attn_mask = cross_attn_mask | class_mismatch_mask
         # --------------------------------
 
         cross_attn_mask = einops.repeat(cross_attn_mask, "bg tn1 tn2 -> (bg n_heads) tn1 tn2", n_heads=self.n_heads).contiguous()
         
-        # Prepare for rel PE:
-        self.rel_pos_map = self.rel_pos_map.to(trajectory_features.device)
-        rel_pe_idx_pairs = torch.stack([
-            torch.stack(
-                torch.meshgrid([_unknown_times_flatten[_], _trajectory_times_flatten[_]]), dim=-1
-            )
-            for _ in range(len(_trajectory_times_flatten))
-        ], dim=0)       # (B*G, T*N of curr, T*N of traj, 2)
-        rel_pe_idx_pairs = rel_pe_idx_pairs.to(trajectory_features.device)
-        rel_pe_idxs = self.rel_pos_map[rel_pe_idx_pairs[..., 0], rel_pe_idx_pairs[..., 1]]      # (B*G, T_curr, T_traj)
-        pass
+        # --- FIX 1: DYNAMIC RELATIVE POSITION INDEXING (A10G Crash Fix) ---
+        # Instead of absolute frame mapping, we use relative distance clamped to rel_pe_length.
+        rel_dist = _unknown_times_flatten[:, :, None] - _trajectory_times_flatten[:, None, :]
+        rel_pe_idxs = rel_dist + (self.rel_pe_length // 2)
+        rel_pe_idxs = torch.clamp(rel_pe_idxs, 0, self.rel_pe_length - 1).long()
+        # ------------------------------------------------------------------
+
         # Change Cross-Attn key_padding_mask and attn_mask to float:
         cross_attn_key_padding_mask = torch.masked_fill(
             cross_attn_key_padding_mask.float(),
@@ -174,14 +170,15 @@ class IDDecoder(nn.Module):
             mask=cross_attn_mask,
             value=float("-inf"),
         ).to(self.dtype)
-        pass
 
         all_unknown_id_logits = None
         all_unknown_id_labels = None
         all_unknown_id_masks = None
 
+        # Determine partition size dynamically
+        partition_size = self.num_id_vocabulary // 2
+
         for layer in range(self.num_layers):
-            # Predict ID logits:
             if use_decoder_checkpoint:
                 unknown_embeds = checkpoint(
                     self._forward_a_layer,
@@ -204,15 +201,22 @@ class IDDecoder(nn.Module):
 
             _unknown_id_logits = self.embed_to_word_layers[layer](unknown_embeds[..., -self.id_dim:])
 
-            # --- ID DICTIONARY RANGE SPLITTING ---
-            # Partition: 0-499 Person (Category 0), 500-999 Car (Category 1)
-            person_mask = (unknown_class_labels == 0).unsqueeze(-1)
-            car_mask = (unknown_class_labels == 1).unsqueeze(-1)
+            # --- FIX 2: CLASS OFFSET & DYNAMIC PARTITIONING ---
+            # Map dataset classes (1, 2) to indices (0, 1)
+            norm_unk_cats = unknown_class_labels - 1
+            person_mask = (norm_unk_cats == 0).unsqueeze(-1)
+            car_mask = (norm_unk_cats == 1).unsqueeze(-1)
             
-            # Mask out invalid ID ranges per class using the 0-indexed categories
-            _unknown_id_logits[..., 500:1000] = torch.where(person_mask, torch.tensor(float("-inf"), device=unknown_embeds.device), _unknown_id_logits[..., 500:1000])
-            _unknown_id_logits[..., 0:500] = torch.where(car_mask, torch.tensor(float("-inf"), device=unknown_embeds.device), _unknown_id_logits[..., 0:500])
-            # --------------------------------------
+            p_start, p_end = 0 * partition_size, 1 * partition_size
+            v_start, v_end = 1 * partition_size, 2 * partition_size
+
+            # Using -10000.0 for stability in BF16/FP16
+            inf_val = torch.tensor(-10000.0, device=unknown_embeds.device, dtype=_unknown_id_logits.dtype)
+
+            # Mask out forbidden ranges
+            _unknown_id_logits[..., v_start:v_end] = torch.where(person_mask, inf_val, _unknown_id_logits[..., v_start:v_end])
+            _unknown_id_logits[..., p_start:p_end] = torch.where(car_mask, inf_val, _unknown_id_logits[..., p_start:p_end])
+            # --------------------------------------------------
 
             _unknown_id_masks = unknown_masks.clone()
             _unknown_id_labels = None if not self.training else unknown_id_labels
@@ -229,6 +233,7 @@ class IDDecoder(nn.Module):
             return all_unknown_id_logits, all_unknown_id_labels, all_unknown_id_masks
         else:
             return _unknown_id_logits, _unknown_id_labels, _unknown_id_masks
+        
 
     def _forward_a_layer(
             self,
@@ -273,6 +278,7 @@ class IDDecoder(nn.Module):
         unknown_embeds = einops.rearrange(cross_out, "(b g) (t n) c -> b g t n c", b=_B, g=_G, t=_curr_T)
 
         return unknown_embeds
+    
 
     def id_label_to_embed(self, id_labels):
         id_words = label_to_one_hot(id_labels, self.num_id_vocabulary + 1, dtype=self.dtype)
