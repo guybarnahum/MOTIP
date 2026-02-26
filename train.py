@@ -186,7 +186,7 @@ def train_engine(config: dict):
     # Extract the dtype from your config (assuming 'config' is your loaded YAML dict)
     
     # Accelerate expects lowercase: "no", "fp16", or "bf16"
-    mixed_precision = config.get("DTYPE", "fp32").lower()
+    mixed_precision = config.get("TRAIN_DTYPE", "fp32").lower()
     if mixed_precision == "fp32":
         mixed_precision = "no"
 
@@ -257,7 +257,7 @@ def train_engine(config: dict):
         print(f"\n🚀 [SYSTEM] Initializing Multi-Class MOTIP Engine")
         print(f"   - Classes Detected: {config['NUM_CLASSES']} (Person + Vehicle)")
         print(f"   - ID Vocabulary: {config['NUM_ID_VOCABULARY']} (Split: 0-499 / 500-999)")
-        print(f"   - Network Logic: Two Logical ID Heads active via Search Space Partitioning.\n")
+        print(f"   - Accelerator mixed-precision: {mixed_precision} \n")
     # ---------------------------------------------
 
     # Load the pre-trained DETR:
