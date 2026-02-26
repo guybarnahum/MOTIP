@@ -48,7 +48,7 @@ sample_intervals: [1,2, 3]
 # Hardware & Memory Optimization (A10G Safe)
 # ------------------------------------------------------------------------
 BATCH_SIZE: 1
-ACCUMULATE_STEPS: 16        # stabilize gradients
+ACCUMULATE_STEPS: 4         # stabilize gradients
 NUM_WORKERS: 1              # Reduced to save RAM/CPU-to-GPU overhead
 USE_DECODER_CHECKPOINT: True # Mandatory for 8-frame windows
 MEMORY_EFFICIENT: True      # Uses custom lightweight memory ops
