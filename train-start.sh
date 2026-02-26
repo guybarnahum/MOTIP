@@ -86,5 +86,7 @@ tmux send-keys -t "$SESSION_NAME" "$DASH_CMD" C-m
 # Return focus to the training pane
 tmux select-pane -t 0
 
+export LOG_PATH="$LOG_FILE"
+
 echo "✅ Training launched!"
 echo "   To view output: tmux attach -t $SESSION_NAME"
