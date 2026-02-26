@@ -35,9 +35,9 @@ class IDCriterion(nn.Module):
 
     def forward(self, id_logits, id_labels, id_masks, id_categories=None):
         """
-        Enhancement: Contrastive Partitioning with Fixes for Scale and Saturation.
+        Fixed: Class Index Mapping and Numerical Stability.
         """
-        # Remove the first T for supervision (standard MOTIP logic)
+        # Remove the first T for supervision
         id_logits = id_logits[:, :, 1:, :, :]
         id_labels = id_labels[:, :, 1:, :]
         id_masks = id_masks[:, :, 1:, :]
@@ -62,20 +62,23 @@ class IDCriterion(nn.Module):
         if id_logits_flatten.shape[0] == 0:
             return id_logits.sum() * 0.0
 
-        # ✅ FIX 2: Temperature vs. Sigmoid Conflict
-        # We only apply the sharpening temperature (0.07) for CrossEntropy (Softmax).
-        # For Focal Loss (Sigmoid), we use T=1.0 to prevent gradient saturation.
+        # Temperature Scaling
         curr_temp = self.temperature if not self.use_focal_loss else 1.0
         id_logits_flatten = id_logits_flatten / curr_temp
 
-        # ✅ FIX 3: Minor Optimization - The Mask Value
-        # Using -inf ensures that forbidden partitions have zero probability 
-        # even after temperature scaling and exponentiation.
+        # ✅ FIXED: MULTI-CLASS PARTITION MASKING
         if id_cats_flatten is not None:
             id_cats_flatten = id_cats_flatten[valid_indices]
-            mask = torch.full_like(id_logits_flatten, float('-inf')) 
+            
+            # 1. Map dataset classes (1, 2) to loop indices (0, 1)
+            # This ensures id_cats_flatten matches the cls_idx in the loop.
+            id_cats_flatten = id_cats_flatten - 1 
+
+            # 2. Use a large negative constant for stability
+            mask = torch.full_like(id_logits_flatten, -10000.0) 
             
             for cls_idx in range(self.num_classes):
+                # Now cls_idx (0, 1) correctly matches the mapped categories
                 is_this_cls = (id_cats_flatten == cls_idx)
                 start = cls_idx * self.partition_size
                 end = (cls_idx + 1) * self.partition_size
@@ -89,14 +92,10 @@ class IDCriterion(nn.Module):
             if not isinstance(id_labels_one_hot, torch.Tensor):
                 id_labels_one_hot = torch.from_numpy(id_labels_one_hot).to(id_logits.device)
             
-            # ✅ FIX 1: The Focal Loss vs. CE "Scale Gap"
-            # Switched from .mean(1) to .sum(1) to make the loss magnitude 
-            # comparable to CrossEntropy and avoid dilution over 1000 slots.
             loss = sigmoid_focal_loss(inputs=id_logits_flatten, targets=id_labels_one_hot).sum()
         else:
             loss = self.ce_loss(id_logits_flatten, id_labels_flatten).sum()
         
-        # Distributed normalization
         num_ids = torch.as_tensor([len(id_logits_flatten)], dtype=torch.float, device=id_logits.device)
         if is_distributed():
             torch.distributed.all_reduce(num_ids)
