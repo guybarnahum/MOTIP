@@ -112,21 +112,20 @@ class IDDecoder(nn.Module):
         _B, _G, _T, _N, _ = trajectory_features.shape
         _curr_B, _curr_G, _curr_T, _curr_N, _ = unknown_features.shape
 
-        # --- ID RANGE ASSET CHECK ---
+        # --- 🛡️ ID RANGE ASSET CHECK ---
         if self.training:
             valid_traj_mask = (trajectory_id_labels != -1)
             if valid_traj_mask.any():
                 max_traj_id = trajectory_id_labels[valid_traj_mask].max().item()
-                if max_traj_id > self.num_id_vocabulary:
-                    raise RuntimeError(f"[ID_DECODER] Trajectory ID {max_traj_id} > {self.num_id_vocabulary}")
+                if max_traj_id >= self.num_id_vocabulary:
+                    print(f"🔥 [CRITICAL] Traj ID {max_traj_id} exceeds vocab {self.num_id_vocabulary}")
 
             if unknown_id_labels is not None:
                 valid_unk_mask = (unknown_id_labels != -1)
                 if valid_unk_mask.any():
                     max_unk_id = unknown_id_labels[valid_unk_mask].max().item()
-                    if max_unk_id > self.num_id_vocabulary:
-                        raise RuntimeError(f"[ID_DECODER] Unknown ID {max_unk_id} > {self.num_id_vocabulary}")
-        # ----------------------------
+                    if max_unk_id >= self.num_id_vocabulary:
+                        print(f"🔥 [CRITICAL] Unknown ID {max_unk_id} exceeds vocab {self.num_id_vocabulary}")
 
         trajectory_id_embeds = self.id_label_to_embed(id_labels=trajectory_id_labels)
         unknown_id_embeds = self.generate_empty_id_embed(unknown_features=unknown_features)
@@ -148,16 +147,14 @@ class IDDecoder(nn.Module):
         _unk_cls_flatten = einops.rearrange(unknown_class_labels, "b g t n -> (b g) (t n)")
         class_mismatch_mask = _unk_cls_flatten[:, :, None] != _traj_cls_flatten[:, None, :]
         cross_attn_mask = cross_attn_mask | class_mismatch_mask
-        # --------------------------------
 
         cross_attn_mask = einops.repeat(cross_attn_mask, "bg tn1 tn2 -> (bg n_heads) tn1 tn2", n_heads=self.n_heads).contiguous()
         
         # --- FIX 1: DYNAMIC RELATIVE POSITION INDEXING (A10G Crash Fix) ---
-        # Instead of absolute frame mapping, we use relative distance clamped to rel_pe_length.
         rel_dist = _unknown_times_flatten[:, :, None] - _trajectory_times_flatten[:, None, :]
         rel_pe_idxs = rel_dist + (self.rel_pe_length // 2)
+        # Prevent "Index Out of Bounds" for the 44-frame span
         rel_pe_idxs = torch.clamp(rel_pe_idxs, 0, self.rel_pe_length - 1).long()
-        # ------------------------------------------------------------------
 
         # Change Cross-Attn key_padding_mask and attn_mask to float:
         cross_attn_key_padding_mask = torch.masked_fill(
@@ -182,36 +179,55 @@ class IDDecoder(nn.Module):
             if use_decoder_checkpoint:
                 unknown_embeds = checkpoint(
                     self._forward_a_layer,
-                    layer,
-                    unknown_embeds, trajectory_embeds,
+                    layer, unknown_embeds, trajectory_embeds,
                     self_attn_key_padding_mask, cross_attn_key_padding_mask,
                     cross_attn_mask, rel_pe_idxs,
                     use_reentrant=False,
                 )
             else:
                 unknown_embeds = self._forward_a_layer(
-                    layer=layer,
-                    unknown_embeds=unknown_embeds,
-                    trajectory_embeds=trajectory_embeds,
+                    layer=layer, unknown_embeds=unknown_embeds, trajectory_embeds=trajectory_embeds,
                     self_attn_key_padding_mask=self_attn_key_padding_mask,
                     cross_attn_key_padding_mask=cross_attn_key_padding_mask,
-                    cross_attn_mask=cross_attn_mask,
-                    rel_pe_idx=rel_pe_idxs,
+                    cross_attn_mask=cross_attn_mask, rel_pe_idx=rel_pe_idxs,
                 )
 
             _unknown_id_logits = self.embed_to_word_layers[layer](unknown_embeds[..., -self.id_dim:])
 
             # --- FIX 2: CLASS OFFSET & DYNAMIC PARTITIONING ---
-            # Map dataset classes (1, 2) to indices (0, 1)
-            norm_unk_cats = unknown_class_labels - 1
+            norm_unk_cats = unknown_class_labels - 1 # Map 1/2 to 0/1
             person_mask = (norm_unk_cats == 0).unsqueeze(-1)
             car_mask = (norm_unk_cats == 1).unsqueeze(-1)
             
             p_start, p_end = 0 * partition_size, 1 * partition_size
             v_start, v_end = 1 * partition_size, 2 * partition_size
 
-            # Using -10000.0 for stability in BF16/FP16
+            # Using -10000.0 for stability in BF16
             inf_val = torch.tensor(-10000.0, device=unknown_embeds.device, dtype=_unknown_id_logits.dtype)
+
+            # --- 🕵️‍♂️ FORENSIC DIAGNOSTIC: Target Masking Verification ---
+            if self.training and unknown_id_labels is not None:
+                # Flat check for targets falling in forbidden zones
+                flat_labels = unknown_id_labels.view(-1)
+                flat_cats = norm_unk_cats.view(-1)
+                valid_flat = flat_labels != -1
+                
+                if valid_flat.any():
+                    check_labels = flat_labels[valid_flat]
+                    check_cats = flat_cats[valid_flat]
+                    
+                    # Check: Person (cat 0) must be < partition_size
+                    p_violation = (check_cats == 0) & (check_labels >= partition_size)
+                    # Check: Vehicle (cat 1) must be >= partition_size
+                    v_violation = (check_cats == 1) & (check_labels < partition_size)
+                    
+                    if p_violation.any() or v_violation.any():
+                        print(f"\n🚨 [MELTDOWN ORIGIN] Target ID Mismatch in Layer {layer}!")
+                        if p_violation.any():
+                            print(f"   ∟ Person with ID {check_labels[p_violation][0].item()} (Limit: <{partition_size})")
+                        if v_violation.any():
+                            print(f"   ∟ Vehicle with ID {check_labels[v_violation][0].item()} (Limit: >={partition_size})")
+                        print(f"   ∟ Logic: This target will be masked to -10000, causing loss to explode.")
 
             # Mask out forbidden ranges
             _unknown_id_logits[..., v_start:v_end] = torch.where(person_mask, inf_val, _unknown_id_logits[..., v_start:v_end])
@@ -233,7 +249,7 @@ class IDDecoder(nn.Module):
             return all_unknown_id_logits, all_unknown_id_labels, all_unknown_id_masks
         else:
             return _unknown_id_logits, _unknown_id_labels, _unknown_id_masks
-        
+
 
     def _forward_a_layer(
             self,

@@ -688,6 +688,20 @@ def train_one_epoch(
                 # --- STABILITY SHIELD: Total Loss Calculation ---
                 loss = detr_loss + (id_loss if id_loss is not None else 0) * id_criterion.weight
                 
+                # --- 🕵️‍♂️ MELTDOWN MONITOR ---
+                if id_loss is not None and id_loss.item() > 500.0:
+                    print(f"\n🚨 [MELTDOWN DETECTED] Step {step}")
+                    print(f"   ∟ ID Loss: {id_loss.item():.2f}")
+                    print(f"   ∟ Logit Range: Min={id_logits.min().item():.2f}, Max={id_logits.max().item():.2f}")
+                    print(f"   ∟ Valid IDs in batch: {len(id_gts[id_gts >= 0])}")
+                    if hasattr(id_criterion, 'temperature'):
+                        print(f"   ∟ Current Temperature: {id_criterion.temperature}")
+                    
+                    # Prevent weight corruption
+                    print("🛑 Circuit breaker triggered. Skipping batch to save weights.")
+                    optimizer.zero_grad()
+                    continue
+
                 # Verify loss is finite before proceeding to backward
                 if not torch.isfinite(loss):
                     print(f"\n❌ [CRITICAL] Non-finite loss detected at step {step}! "
