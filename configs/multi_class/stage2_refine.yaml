@@ -25,7 +25,7 @@ LR: 1.0e-5
 LR_DROP: 6          
 LR_BACKBONE: 1.0e-6
 LR_WARMUP_EPOCHS: 1 
-LR_DICTIONARY_SCALE: 10.0  # High scale to keep ID gradients active
+LR_DICTIONARY_SCALE: 1.0 
 
 # ------------------------------------------------------------------------
 # LOSS REBALANCING & IDENTITY GLUE
@@ -35,7 +35,7 @@ DETR_BBOX_LOSS_COEF: 5.0
 DETR_GIOU_LOSS_COEF: 2.0
 
 ID_LOSS_WEIGHT: 1.0        
-ID_TEMPERATURE: 0.05       # Crucial for InfoNCE contrastive sharpening
+ID_TEMPERATURE: 0.07       # Crucial for InfoNCE contrastive sharpening
 USE_FOCAL_LOSS: False      # Stick to CE for better contrastive performance
 
 # ------------------------------------------------------------------------
