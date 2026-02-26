@@ -195,7 +195,7 @@ class IDDecoder(nn.Module):
             _unknown_id_logits = self.embed_to_word_layers[layer](unknown_embeds[..., -self.id_dim:])
 
             # --- FIX 2: CLASS OFFSET & DYNAMIC PARTITIONING ---
-            norm_unk_cats = unknown_class_labels - 1 # Map 1/2 to 0/1
+            norm_unk_cats = unknown_class_labels
             person_mask = (norm_unk_cats == 0).unsqueeze(-1)
             car_mask = (norm_unk_cats == 1).unsqueeze(-1)
             

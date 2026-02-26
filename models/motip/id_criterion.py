@@ -57,11 +57,17 @@ class IDCriterion(nn.Module):
 
         if id_cats_flatten is not None:
             id_cats_flatten = id_cats_flatten[valid_indices]
-            # Mapping 1/2 to 0/1
-            norm_id_cats = id_cats_flatten - 1 
+            
+            # --- FIX 1: REVERT OFFSET (Data is already 0/1) ---
+            norm_id_cats = id_cats_flatten 
 
-            # Create mask
             mask = torch.full_like(id_logits_flatten, -10000.0) 
+            
+            # --- FIX 2: PROTECT NEWBORN SLOT ---
+            # Index 1000 (num_id_vocabulary) must always be 0.0 so it's never masked
+            if id_logits_flatten.shape[-1] > self.num_id_vocabulary:
+                mask[:, self.num_id_vocabulary] = 0.0
+
             for cls_idx in range(self.num_classes):
                 is_this_cls = (norm_id_cats == cls_idx)
                 start = cls_idx * self.partition_size

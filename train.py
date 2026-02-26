@@ -95,12 +95,12 @@ def do_id_partition_sanity_check(targets, step_idx, print_freq=50, accelerator=N
             ids = frame['id']        # Ground Truth IDs
             cats = frame['category']  # 0=Person, 1=Vehicle
             
-            # 2. Filter out Padding (-1) before checking
+            # 2. Filter out Padding (-1) and newborn ID before checking
             # Your collate_fn uses -1 for padding; we must ignore these.
-            valid_mask = ids >= 0
+            valid_mask = (ids >= 0) & (ids < 1000) 
             if not valid_mask.any():
                 continue
-                
+            
             v_ids = ids[valid_mask]
             v_cats = cats[valid_mask]
 
