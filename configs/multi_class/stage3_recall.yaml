@@ -1,9 +1,9 @@
-# configs/multi_class/stage3_16_frames.yaml
+# configs/multi_class/stage3_recall.yaml
 
 # ------------------------------------------------------------------------
-# STAGE 3: TEMPORAL EXPANSION (16-Frame Window)
-# Goal: Bridge long occlusions and reach 40%+ IDF1
-# Logic: Maximum temporal depth for A10G (24GB) limits.
+# STAGE 3: RECALL CONVERGENCE & GLOBAL CONTEXT
+# Goal: Break the 17% DetA barrier and flip MOTA to positive.
+# Strategy: Aggressive CLS loss + Full 1024px crops + Long-term sampling.
 # ------------------------------------------------------------------------
 
 SUPER_CONFIG_PATH: ./configs/r50_deformable_detr_motip_dancetrack.yaml
@@ -15,22 +15,26 @@ NUM_ID_VOCABULARY: 1000
 # Weights Initialization
 # Resuming from the end of the Stage 2 "Plateau"
 DETR_PRETRAIN: ./pretrains/motip_stage2_refine.pth
-RESUME_OPTIMIZER: False
-RESUME_SCHEDULER: False
+RESUME_OPTIMIZER: True
+RESUME_SCHEDULER: True
+
+# --- RECALL AGGRESSION ---
+DETR_CLS_LOSS_COEF: 10.0  # Force the model to find small pedestrians
+DETR_BBOX_LOSS_COEF: 2.0  # Localization is fine, focus on class confidence
+ID_LOSS_WEIGHT: 0.2       # Identity is stable; don't let it over-dominate classification
 
 # ------------------------------------------------------------------------
 # Training Strategy: 6-Epoch 
 # ------------------------------------------------------------------------
 EPOCHS: 6           
-LR: 5.0e-6          # Ultra-low to preserve the high-precision foundation
-LR_DROP: 4          
-LR_BACKBONE: 5.0e-7
+LR: 1.0e-5
+LR_BACKBONE: 2.0e-6
+LR_DROP: 4
 LR_WARMUP_EPOCHS: 1 
 
-# --- CRITICAL CHANGE ---
-# Deep Temporal Window: 16 frames forces the model to learn Re-ID signatures
+# --- TEMPORAL STRETCH ---
 sampler_lengths: [16]
-sample_intervals: [2, 3, 4, 5] # Increased intervals to simulate longer occlusions
+sample_intervals: [1, 2, 4, 8, 12] # Re-ID training for long-term survival
 
 # ------------------------------------------------------------------------
 # Hardware Safety (A10G Hard Limit)
@@ -42,9 +46,11 @@ USE_DECODER_CHECKPOINT: True
 PREFETCH_FACTOR: 2     
 MEMORY_EFFICIENT: True
 
-# Keep 608px to prevent OOM during the 16-frame attention calculation
-AUG_MAX_SIZE: 608
-AUG_RANDOM_RESIZE: [256, 320, 384, 448, 480, 512, 544, 576, 608]
+# --- THE GLOBAL BREAKOUT ---
+AUG_MAX_SIZE: 1024
+AUG_RANDOM_CROP_MAX: 1024 
+AUG_RANDOM_CROP_MIN: 800
+AUG_RANDOM_RESIZE: [480, 512, 544, 576, 608, 640, 672, 704, 768, 832, 896, 960, 1024]
 
 # ------------------------------------------------------------------------
 # Validation Config (Targeting IDF1)
