@@ -18,23 +18,37 @@ DETR_PRETRAIN: ./pretrains/motip_stage2_refine.pth
 RESUME_OPTIMIZER: True
 RESUME_SCHEDULER: True
 
-# --- RECALL AGGRESSION ---
-DETR_CLS_LOSS_COEF: 10.0  # Force the model to find small pedestrians
-DETR_BBOX_LOSS_COEF: 2.0  # Localization is fine, focus on class confidence
-ID_LOSS_WEIGHT: 0.2       # Identity is stable; don't let it over-dominate classification
+# --- RECALL AGGRESSION (The Sledgehammer) ---
+DETR_CLS_LOSS_COEF: 10.0   # Increase from 5.0 to force detection of small objects
+DETR_BBOX_LOSS_COEF: 2.0   # Lowered to shift focus toward "finding" rather than "fitting"
+ID_LOSS_WEIGHT: 0.2        # Relaxed because the ID Head (3.9 loss) is already stable
+USE_FOCAL_LOSS: True       # Critical for handling the background-to-crowd imbalance
 
-# ------------------------------------------------------------------------
-# Training Strategy: 6-Epoch 
-# ------------------------------------------------------------------------
+# --- HUNGARIAN MATHER ALIGNMENT ---
+# These ensure the matcher is as aggressive as the loss function
+DETR_SET_COST_CLASS: 4.0   # Boosted from 2.0 to force query-to-GT assignment
+DETR_NUM_QUERIES: 900      # Increased from 300 to handle ultra-dense DanceTrack scenes
+DETR_EOS_COEF: 0.05        # Lowered from 0.1 to make the model "braver" (less bias toward background)
+DETR_FOCAL_ALPHA: 0.5      # Increase from 0.25 to weight "Person" more than "Background"
+
+# --- LEARNING STRATEGY ---
 EPOCHS: 6           
-LR: 1.0e-5
-LR_BACKBONE: 2.0e-6
-LR_DROP: 4
-LR_WARMUP_EPOCHS: 1 
+LR: 1.0e-5                 # Main head learning rate
+LR_BACKBONE: 2.0e-6        # Doubled from Stage 2 to force backbone feature re-mapping
+LR_DROP: 4          
+LR_WARMUP_EPOCHS: 1        # Linear ramp to prevent gradient spikes on the new 10.0 loss
 
-# --- TEMPORAL STRETCH ---
+# --- THE GLOBAL BREAKOUT (Visual Context) ---
+AUG_MAX_SIZE: 1024
+AUG_RANDOM_CROP_MAX: 1024  # No more 800px leash. Model sees the full 1024px global scene.
+AUG_RANDOM_CROP_MIN: 800
+# Multi-scale scale jittering to improve recall across different object sizes
+AUG_RANDOM_RESIZE: [480, 512, 544, 576, 608, 640, 672, 704, 768, 832, 896, 960, 1024]
+
+# --- TEMPORAL ELASTICITY ---
+# Stretching the window to force ID survival over long occlusions
 sampler_lengths: [16]
-sample_intervals: [1, 2, 4, 8, 12] # Re-ID training for long-term survival
+sample_intervals: [1, 2, 4, 8, 12]
 
 # ------------------------------------------------------------------------
 # Hardware Safety (A10G Hard Limit)
@@ -45,12 +59,6 @@ NUM_WORKERS: 2
 USE_DECODER_CHECKPOINT: True
 PREFETCH_FACTOR: 2     
 MEMORY_EFFICIENT: True
-
-# --- THE GLOBAL BREAKOUT ---
-AUG_MAX_SIZE: 1024
-AUG_RANDOM_CROP_MAX: 1024 
-AUG_RANDOM_CROP_MIN: 800
-AUG_RANDOM_RESIZE: [480, 512, 544, 576, 608, 640, 672, 704, 768, 832, 896, 960, 1024]
 
 # ------------------------------------------------------------------------
 # Validation Config (Targeting IDF1)
@@ -67,8 +75,9 @@ val_config:
     car: 2
 
 # Inference Settings: "Production" Mode
-INFERENCE_MAX_LONGER: 1333
+INFERENCE_MAX_LONGER: 1920
+INFERENCE_MAX_SHORTER: 1024
 ASSIGNMENT_PROTOCOL: hungarian
-DET_THRESH: 0.4             # Slightly higher for cleaner results
+DET_THRESH: 0.25             
 NEWBORN_THRESH: 0.4         
 ID_THRESH: 0.3              # Stricter ID matching

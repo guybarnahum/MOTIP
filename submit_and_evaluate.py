@@ -221,9 +221,9 @@ def submit_and_evaluate_one_model(
         use_sigmoid: bool = False,
         assignment_protocol: str = "hungarian",
         miss_tolerance: int = 30,
-        det_thresh: float = 0.4,
-        newborn_thresh: float = 0.4,
-        id_thresh: float = 0.1,
+        det_thresh: float = 0.2,
+        newborn_thresh: float = 0.2,
+        id_thresh: float = 0.15,
         area_thresh: int = 0,
         inference_only_detr: bool = False,
         dtype: str = "FP32",
@@ -239,8 +239,9 @@ def submit_and_evaluate_one_model(
         limit_seqs = val_config.get("LIMIT_VAL_SEQ", None)
 
     # 2. FIX GEOMETRY: Ensure max_longer > max_shorter for torchvision v2.Resize
-    if image_max_longer <= image_max_shorter:
-        image_max_longer = 1333 
+    if image_max_longer < (image_max_shorter * 1.2):
+        # Standard aspect ratio buffer (1024 * 1.6 = ~1638)
+        image_max_longer = int(image_max_shorter * 1.6)
         
     diag_log(f"📊 [EVAL] Frame Limit: {limit_frames} | Resize: {image_max_shorter}x{image_max_longer}")
 
@@ -431,7 +432,7 @@ def main():
         outputs_dir=args.output_dir,
         val_config=cfg.get("val_config", None),
         image_max_shorter=cfg.get("INFERENCE_MAX_SHORTER", 800),
-        image_max_longer=args.image_max_longer if hasattr(args, 'image_max_longer') else 1333,
+        image_max_longer=cfg.get("INFERENCE_MAX_LONGER", 1333),
         size_divisibility=cfg.get("SIZE_DIVISIBILITY", 0),
         use_sigmoid=cfg.get("USE_FOCAL_LOSS", False),
         assignment_protocol=cfg.get("ASSIGNMENT_PROTOCOL", "hungarian"),

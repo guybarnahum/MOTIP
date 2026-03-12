@@ -415,6 +415,7 @@ def train_engine(config: dict):
                         outputs_dir=os.path.join(outputs_dir, "train", "eval_during_train", f"epoch_{epoch}"),
                         val_config=config.get("val_config", None),
                         image_max_longer=config["INFERENCE_MAX_LONGER"],
+                        image_max_shorter=config["INFERENCE_MAX_SHORTER"],
                         size_divisibility=config.get("SIZE_DIVISIBILITY", 0),
                         miss_tolerance=config["MISS_TOLERANCE"],
                         use_sigmoid=config["USE_FOCAL_LOSS"] if "USE_FOCAL_LOSS" in config else False,
