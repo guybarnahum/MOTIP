@@ -265,9 +265,34 @@ class RuntimeTracker:
                 id_scores = id_logits.softmax(dim=-1)
             else:
                 id_scores = id_logits.sigmoid()
-                
+
             id_scores[is_person ,  self.split_idx:] = 0.0
             id_scores[is_vehicle, :self.split_idx ] = 0.0
+
+            # IMPORTANT: reduce id_scores to the current tracker columns (stable
+            # `trajectory_id_labels`) plus the newborn slot. This makes assignment
+            # outputs refer to tracker column indices (0..num_cols) instead of
+            # global vocabulary indices (0..V-1). We store the mapping in
+            # `self._col_id_labels_for_assignment` for assignment helpers to use.
+            self._col_id_labels_for_assignment = None
+            if self.trajectory_id_labels.shape[0] > 0:
+                try:
+                    col_id_labels = list(self.trajectory_id_labels[0].tolist())
+                    # gather columns for existing labels
+                    cols = torch.tensor(col_id_labels, dtype=torch.long, device=id_scores.device)
+                    if cols.numel() > 0:
+                        id_scores_cols = id_scores.index_select(dim=1, index=cols)
+                    else:
+                        id_scores_cols = id_scores.new_zeros((id_scores.shape[0], 0))
+                    # newborn column is the vocabulary index equal to `num_id_vocabulary`
+                    newborn_idx = int(self.num_id_vocabulary)
+                    newborn_col = id_scores[:, newborn_idx:newborn_idx+1]
+                    id_scores = torch.cat((id_scores_cols, newborn_col), dim=1)
+                    # mapping: column_index -> id_label (last entry is newborn sentinel)
+                    self._col_id_labels_for_assignment = col_id_labels + [self.num_id_vocabulary]
+                except Exception:
+                    # If any error occurs, fall back to using full-vocab id_scores
+                    self._col_id_labels_for_assignment = None
 
             # 5. assign id labels:
             match self.assignment_protocol:
@@ -438,6 +463,8 @@ class RuntimeTracker:
             id_scores = torch.cat((id_scores, id_scores_newborn_repeat), dim=-1)
 
         trajectory_id_labels_set = set(self.trajectory_id_labels[0].tolist()) if self.trajectory_id_labels.shape[0] > 0 else set()
+        # If id_scores were reduced to tracker columns, use the stored mapping
+        col_map = getattr(self, "_col_id_labels_for_assignment", None)
 
         # Initialize all as newborn (background) then fill by assigned row index
         id_labels = [self.num_id_vocabulary] * num_objs
@@ -450,16 +477,28 @@ class RuntimeTracker:
         except Exception:
             pass
         for r, c in zip(match_rows.tolist(), match_cols.tolist()):
-            _id = c
-            # Column indices >= vocab indicate assigned to newborn placeholder
-            if _id >= self.num_id_vocabulary:
-                label = self.num_id_vocabulary
-            elif _id not in trajectory_id_labels_set:
-                label = self.num_id_vocabulary
-            elif id_scores[r, _id] < self.id_thresh:
-                label = self.num_id_vocabulary
+            if col_map is not None:
+                # c is a column index into `col_map`
+                if c < 0 or c >= len(col_map):
+                    label = self.num_id_vocabulary
+                else:
+                    label = int(col_map[c])
+                # apply confidence threshold on the reduced id_scores
+                if id_scores[r, c] < self.id_thresh:
+                    label = self.num_id_vocabulary
+                # ensure label exists in trajectory set unless it's newborn
+                if label != self.num_id_vocabulary and label not in trajectory_id_labels_set:
+                    label = self.num_id_vocabulary
             else:
-                label = int(_id)
+                _id = c
+                if _id >= self.num_id_vocabulary:
+                    label = self.num_id_vocabulary
+                elif _id not in trajectory_id_labels_set:
+                    label = self.num_id_vocabulary
+                elif id_scores[r, _id] < self.id_thresh:
+                    label = self.num_id_vocabulary
+                else:
+                    label = int(_id)
             id_labels[r] = label
         if os.environ.get("RUNTIME_TRACKER_DEBUG") == "1":
             print("[RUNTIME_TRACKER DEBUG] hungarian_assignments_rows=", match_rows.tolist(), "cols=", match_cols.tolist(), "result_labels=", id_labels)
@@ -468,28 +507,35 @@ class RuntimeTracker:
     def _object_max_assignment(self, id_scores: torch.Tensor):
         id_labels = list()
         trajectory_id_labels_set = set(self.trajectory_id_labels[0].tolist()) if self.trajectory_id_labels.shape[0] > 0 else set()
+        col_map = getattr(self, "_col_id_labels_for_assignment", None)
         object_max_confs, object_max_id_labels = torch.max(id_scores, dim=-1)
         id_max_confs = dict()
-        for conf, id_label in zip(object_max_confs.tolist(), object_max_id_labels.tolist()):
-            if id_label not in id_max_confs:
-                id_max_confs[id_label] = conf
+        # Build per-id (actual id_label) max confidences
+        for conf, id_label_idx in zip(object_max_confs.tolist(), object_max_id_labels.tolist()):
+            if col_map is not None:
+                mapped = int(col_map[int(id_label_idx)]) if 0 <= int(id_label_idx) < len(col_map) else self.num_id_vocabulary
             else:
-                id_max_confs[id_label] = max(id_max_confs[id_label], conf)
+                mapped = int(id_label_idx)
+            if mapped not in id_max_confs:
+                id_max_confs[mapped] = conf
+            else:
+                id_max_confs[mapped] = max(id_max_confs[mapped], conf)
         if self.num_id_vocabulary in id_max_confs:
             id_max_confs[self.num_id_vocabulary] = 0.0
 
-        for _ in range(len(object_max_id_labels)):
-            if object_max_id_labels[_].item() not in trajectory_id_labels_set:
+        for obj_idx in range(len(object_max_id_labels)):
+            id_label_idx = int(object_max_id_labels[obj_idx].item())
+            mapped_label = int(col_map[id_label_idx]) if (col_map is not None and 0 <= id_label_idx < len(col_map)) else id_label_idx
+            if mapped_label not in trajectory_id_labels_set:
                 id_labels.append(self.num_id_vocabulary)
             else:
-                _id_label = object_max_id_labels[_].item()
-                _conf = object_max_confs[_].item()
-                if _conf < self.id_thresh or _conf < id_max_confs[_id_label]:
+                _conf = float(object_max_confs[obj_idx].item())
+                if _conf < self.id_thresh or _conf < id_max_confs.get(mapped_label, -1.0):
                     id_labels.append(self.num_id_vocabulary)
-                elif _id_label in id_labels:
+                elif mapped_label in id_labels:
                     id_labels.append(self.num_id_vocabulary)
                 else:
-                    id_labels.append(_id_label)
+                    id_labels.append(mapped_label)
         if os.environ.get("RUNTIME_TRACKER_DEBUG") == "1":
             print("[RUNTIME_TRACKER DEBUG] object_max_result=", id_labels)
         return id_labels
@@ -497,7 +543,8 @@ class RuntimeTracker:
     def _id_max_assignment(self, id_scores: torch.Tensor):
         id_labels = [self.num_id_vocabulary] * len(id_scores)
         trajectory_id_labels_set = set(self.trajectory_id_labels[0].tolist()) if self.trajectory_id_labels.shape[0] > 0 else set()
-        # id_max_confs: per-id confidence; id_max_obj_idxs: the object idx which gives that max for that id
+        col_map = getattr(self, "_col_id_labels_for_assignment", None)
+        # id_max_confs: per-column confidence; id_max_obj_idxs: object idx which gives that max for that column
         id_max_confs, id_max_obj_idxs = torch.max(id_scores, dim=0)
         object_max_confs = dict()
         for conf, object_idx in zip(id_max_confs.tolist(), id_max_obj_idxs.tolist()):
@@ -507,11 +554,11 @@ class RuntimeTracker:
                 if conf == object_max_confs[object_idx]:
                     conf = conf - 0.0001
                 object_max_confs[object_idx] = max(object_max_confs[object_idx], conf)
-        # Iterate per id_label (index) to find its best object and possibly assign
-        for id_label_idx in range(len(id_max_obj_idxs)):
-            _obj_idx = int(id_max_obj_idxs[id_label_idx].item())
-            _conf = float(id_max_confs[id_label_idx].item())
-            _id_label = id_label_idx
+        # Iterate per column to find its best object and possibly assign
+        for col_idx in range(len(id_max_obj_idxs)):
+            _obj_idx = int(id_max_obj_idxs[col_idx].item())
+            _conf = float(id_max_confs[col_idx].item())
+            _id_label = int(col_map[col_idx]) if (col_map is not None and 0 <= col_idx < len(col_map)) else col_idx
             if _conf < self.id_thresh or _conf < object_max_confs.get(_obj_idx, -1.0):
                 continue
             if _id_label not in trajectory_id_labels_set:
