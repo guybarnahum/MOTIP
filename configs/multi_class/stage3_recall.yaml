@@ -29,7 +29,7 @@ USE_FOCAL_LOSS: True       # Critical for handling the background-to-crowd imbal
 DETR_SET_COST_CLASS: 4.0   # Boosted from 2.0 to force query-to-GT assignment
 DETR_NUM_QUERIES: 900      # Increased from 300 to handle ultra-dense DanceTrack scenes
 DETR_EOS_COEF: 0.05        # Lowered from 0.1 to make the model "braver" (less bias toward background)
-DETR_FOCAL_ALPHA: 0.5      # Increase from 0.25 to weight "Person" more than "Background"
+DETR_FOCAL_ALPHA: 0.65     # Increase from 0.25 to weight "Person" more than "Background"
 
 # --- LEARNING STRATEGY ---
 EPOCHS: 6           
@@ -78,6 +78,6 @@ val_config:
 INFERENCE_MAX_LONGER: 1920
 INFERENCE_MAX_SHORTER: 1024
 ASSIGNMENT_PROTOCOL: hungarian
-DET_THRESH: 0.25             
+DET_THRESH: 0.2             
 NEWBORN_THRESH: 0.4         
 ID_THRESH: 0.3              # Stricter ID matching
