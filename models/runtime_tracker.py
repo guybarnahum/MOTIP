@@ -232,9 +232,23 @@ class RuntimeTracker:
             # 3. forward:
             seq_info = self.model(seq_info=seq_info, part="trajectory_modeling")
             id_logits, _, _ = self.model(seq_info=seq_info, part="id_decoder")
-            
+
             # 4. get scores (with masking):
             id_logits = id_logits[0, 0, 0] # (N, Vocab)
+
+            # Extra forensic debug: print raw logits/top-k and argmaxs for first few objects
+            if os.environ.get("RUNTIME_TRACKER_DEBUG") == "1":
+                try:
+                    raw = id_logits.detach().cpu()
+                    n_show = min(3, raw.shape[0])
+                    topk_vals, topk_idx = raw.topk(5, dim=-1)
+                    sample_info = []
+                    for i in range(n_show):
+                        sample_info.append((i, topk_idx[i].tolist(), [float(v) for v in topk_vals[i].tolist()]))
+                    print("[RUNTIME_TRACKER DEBUG] raw_id_logits_topk=", sample_info)
+                    print("[RUNTIME_TRACKER DEBUG] id_logits_argmax=", raw.argmax(dim=-1).tolist(), "argmax_max=", [float(x) for x in raw.max(dim=-1).values.tolist()])
+                except Exception:
+                    pass
             
             # --- ENHANCEMENT: Logit Masking to enforce partitions ---
             
