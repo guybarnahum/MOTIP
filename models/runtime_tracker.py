@@ -150,7 +150,33 @@ class RuntimeTracker:
                 tid_head = self.trajectory_id_labels[0].cpu().tolist() if self.trajectory_id_labels.shape[0] > 0 else []
             except Exception:
                 tid_head = str(self.trajectory_id_labels.shape)
+            # Basic snapshot
             print("[RUNTIME_TRACKER DEBUG] id_labels=", id_labels.cpu().tolist(), "ids=", ids_list, "id_label_to_id=", dict(self.id_label_to_id), "traj_head=", tid_head)
+
+            # Extended snapshot: shapes and internal pointers
+            try:
+                shapes = {
+                    'features': tuple(self.trajectory_features.shape),
+                    'boxes': tuple(self.trajectory_boxes.shape),
+                    'id_labels': tuple(self.trajectory_id_labels.shape),
+                    'masks': tuple(self.trajectory_masks.shape),
+                }
+            except Exception:
+                shapes = str((self.trajectory_features.shape, self.trajectory_boxes.shape, self.trajectory_id_labels.shape))
+            print("[RUNTIME_TRACKER DEBUG] shapes=", shapes, "next_id=", self.next_id, "person_ptr=", self.person_ptr, "vehicle_ptr=", self.vehicle_ptr)
+
+            # Column-level mapping (column idx -> id_label -> global id)
+            try:
+                if self.trajectory_id_labels.shape[0] > 0:
+                    col_labels = self.trajectory_id_labels[0].cpu().tolist()
+                    col_map = []
+                    for ci, lab in enumerate(col_labels):
+                        col_map.append((ci, lab, self.id_label_to_id.get(lab, None)))
+                else:
+                    col_map = []
+            except Exception:
+                col_map = str(self.trajectory_id_labels.shape)
+            print("[RUNTIME_TRACKER DEBUG] col_map=", col_map)
 
         # Trajectory & Cleanup
         self._update_trajectory_infos(boxes=boxes, output_embeds=output_embeds, id_labels=id_labels, categories=categories)
@@ -279,6 +305,8 @@ class RuntimeTracker:
             # Assign numeric ID for this id_label only if not already mapped
             if new_id_label not in self.id_label_to_id:
                 self.id_label_to_id[new_id_label] = self.next_id
+                if os.environ.get("RUNTIME_TRACKER_DEBUG") == "1":
+                    print(f"[RUNTIME_TRACKER DEBUG] new mapping id_label->{new_id_label} => global id {self.next_id}")
                 self.next_id += 1
             pred_id_labels[idx] = new_id_label
 
@@ -400,6 +428,13 @@ class RuntimeTracker:
         # Initialize all as newborn (background) then fill by assigned row index
         id_labels = [self.num_id_vocabulary] * num_objs
         match_rows, match_cols = linear_sum_assignment(1 - id_scores.cpu())
+        # Debug: show top scores per row
+        try:
+            tops = [list(enumerate(row.tolist()))[:5] for row in id_scores.cpu()]
+            if os.environ.get("RUNTIME_TRACKER_DEBUG") == "1":
+                print("[RUNTIME_TRACKER DEBUG] hungarian id_scores_rows_sample=", tops)
+        except Exception:
+            pass
         for r, c in zip(match_rows.tolist(), match_cols.tolist()):
             _id = c
             # Column indices >= vocab indicate assigned to newborn placeholder
@@ -412,6 +447,8 @@ class RuntimeTracker:
             else:
                 label = int(_id)
             id_labels[r] = label
+        if os.environ.get("RUNTIME_TRACKER_DEBUG") == "1":
+            print("[RUNTIME_TRACKER DEBUG] hungarian_assignments_rows=", match_rows.tolist(), "cols=", match_cols.tolist(), "result_labels=", id_labels)
         return id_labels
 
     def _object_max_assignment(self, id_scores: torch.Tensor):
@@ -439,6 +476,8 @@ class RuntimeTracker:
                     id_labels.append(self.num_id_vocabulary)
                 else:
                     id_labels.append(_id_label)
+        if os.environ.get("RUNTIME_TRACKER_DEBUG") == "1":
+            print("[RUNTIME_TRACKER DEBUG] object_max_result=", id_labels)
         return id_labels
 
     def _id_max_assignment(self, id_scores: torch.Tensor):
@@ -466,4 +505,6 @@ class RuntimeTracker:
             # Assign this id_label to the corresponding object index
             if _obj_idx < len(id_labels):
                 id_labels[_obj_idx] = _id_label
+        if os.environ.get("RUNTIME_TRACKER_DEBUG") == "1":
+            print("[RUNTIME_TRACKER DEBUG] id_max_result=", id_labels)
         return id_labels

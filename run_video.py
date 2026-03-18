@@ -278,21 +278,22 @@ def main():
             active_res = {k: v[mask] for k, v in res.items() if isinstance(v, torch.Tensor)}
             active_res_cpu = {k: v.cpu() for k, v in active_res.items()}
 
-            # --- CHANGE: Use internal labels for drawing ---
-            # valid_ids = active_res_cpu['id'].tolist()        <-- This was the Global ID
-            valid_ids = active_res_cpu['id_labels'].tolist() # <-- This is the Internal Slot (0-999)
-            
+            # Use the model's GLOBAL numeric IDs for memory/drawing and
+            # keep internal `id_labels` only as `original_ids` for display.
+            valid_ids = active_res_cpu['id'].tolist()        # Global numeric ID
+            original_ids = active_res_cpu['id_labels'].tolist() # Internal slot (0..V-1)
+
             valid_cats = active_res_cpu['category'].tolist()
             valid_boxes = active_res_cpu['bbox'].float().numpy()
-            
-            # Keep Global ID for ReID matching logic
+
+            # Keep Global ID tensor for ReID matching logic
             active_ids_gpu = active_res['id']
             active_embeds = active_res.get('embeddings')
 
             # --- C. MEMORY UPDATE ---
             final_ids = []
             if memory is not None and active_embeds is not None and len(valid_ids) > 0:
-                # Use the GPU tensor directly to avoid Re-Tensoring
+                # Use the GPU tensor directly to avoid re-tensoring
                 id_map = memory.update(frame_idx, active_ids_gpu, active_embeds)
                 final_ids = [id_map.get(vid, vid) for vid in valid_ids]
             else:
@@ -305,7 +306,7 @@ def main():
             
             # 2. Draw Tracks (In-Place)
             if len(final_ids) > 0:
-                annotator.draw_tracks(frame, valid_boxes, final_ids, categories=valid_cats, original_ids=valid_ids)
+                annotator.draw_tracks(frame, valid_boxes, final_ids, categories=valid_cats, original_ids=original_ids)
             
             # 3. Draw Dashboard 
             # Calculate ACTIVE revivals for this specific frame only
