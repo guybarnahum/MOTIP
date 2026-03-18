@@ -261,21 +261,25 @@ class RuntimeTracker:
                 new_id_label = self.vehicle_id_pool[self.vehicle_ptr % v_size]
                 self.vehicle_ptr += 1
             
-            # --- Cleanup Logic: Same as original, but vectorized for safety ---
+            # --- Reuse existing lane instead of deleting columns ---
             if self.trajectory_id_labels.shape[0] > 0:
-                # If this 'lane' (ID Label) is already active, we must purge its history
-                rem_mask = (self.trajectory_id_labels[0] == new_id_label)
-                if rem_mask.any():
-                    self.trajectory_features = self.trajectory_features[:, ~rem_mask]
-                    self.trajectory_boxes = self.trajectory_boxes[:, ~rem_mask]
-                    self.trajectory_id_labels = self.trajectory_id_labels[:, ~rem_mask]
-                    self.trajectory_category_labels = self.trajectory_category_labels[:, ~rem_mask]
-                    self.trajectory_times = self.trajectory_times[:, ~rem_mask]
-                    self.trajectory_masks = self.trajectory_masks[:, ~rem_mask]
+                rem_idx = (self.trajectory_id_labels[0] == new_id_label).nonzero(as_tuple=True)[0]
+                if rem_idx.numel() > 0:
+                    # Reuse the first matching column index to avoid re-ordering columns
+                    col = int(rem_idx[0].item())
+                    if self.trajectory_features.shape[0] > 0:
+                        self.trajectory_features[:, col, :] = 0
+                        self.trajectory_boxes[:, col, :] = 0
+                        self.trajectory_times[:, col] = 0
+                        self.trajectory_masks[:, col] = True
+                    # Keep `trajectory_id_labels` consistent and update category
+                    self.trajectory_id_labels[:, col] = new_id_label
+                    self.trajectory_category_labels[:, col] = cat
 
-            # Assign the IDs
-            self.id_label_to_id[new_id_label] = self.next_id
-            self.next_id += 1
+            # Assign numeric ID for this id_label only if not already mapped
+            if new_id_label not in self.id_label_to_id:
+                self.id_label_to_id[new_id_label] = self.next_id
+                self.next_id += 1
             pred_id_labels[idx] = new_id_label
 
         return pred_id_labels
@@ -294,7 +298,12 @@ class RuntimeTracker:
         newborn_id_labels = _id_labels - already_id_labels
         # 3. add newborn instances to trajectory infos:
         if len(newborn_id_labels) > 0:
-            newborn_id_labels_list = list(newborn_id_labels)
+            # Preserve detection order when adding newborns to avoid
+            # non-deterministic column ordering caused by iterating over sets.
+            newborn_id_labels_list = []
+            for l in id_labels.tolist():
+                if l in newborn_id_labels and l not in newborn_id_labels_list:
+                    newborn_id_labels_list.append(l)
             newborn_id_labels_tensor = torch.tensor(newborn_id_labels_list, dtype=torch.int64, device=distributed_device())
             _T = self.trajectory_id_labels.shape[0]
             _N = len(newborn_id_labels_list)
