@@ -22,6 +22,7 @@ class RuntimeTracker:
             det_thresh: float = 0.5,
             newborn_thresh: float = 0.7,
             id_thresh: float = 0.3,
+            newborn_iou_thresh: float = 0.5,
             area_thresh: int = 0,
             only_detr: bool = False,
             dtype: torch.dtype = torch.float32,
@@ -44,6 +45,7 @@ class RuntimeTracker:
         self.det_thresh = det_thresh
         self.newborn_thresh = newborn_thresh
         self.id_thresh = id_thresh
+        self.newborn_iou_thresh = newborn_iou_thresh
         self.area_thresh = area_thresh
         self.only_detr = only_detr
         self.num_id_vocabulary = get_model(model).num_id_vocabulary
@@ -334,6 +336,54 @@ class RuntimeTracker:
                 case "object-max": id_labels = self._object_max_assignment(id_scores=id_scores)
                 case "id-max": id_labels = self._id_max_assignment(id_scores=id_scores)
                 case _: raise NotImplementedError
+
+            # IoU-based gating override:
+            # If the assignment produced a newborn for an object, but there exists
+            # a high-confidence non-newborn column with strong spatial overlap
+            # (IoU >= `newborn_iou_thresh`) and sufficient id confidence
+            # (>= `id_thresh`), prefer that existing column instead of creating
+            # a new id_label. This reduces spurious per-frame newborn allocations.
+            try:
+                col_map = getattr(self, "_col_id_labels_for_assignment", None)
+                if col_map is not None:
+                    # indices of columns that are NOT the newborn sentinel
+                    non_newborn_cols = [i for i, v in enumerate(col_map) if v != self.num_id_vocabulary]
+                    if len(non_newborn_cols) > 0:
+                        for r, lab in enumerate(id_labels):
+                            if lab == self.num_id_vocabulary:
+                                # Best candidate among non-newborn columns
+                                try:
+                                    row_scores = id_scores[r]
+                                    # advanced-indexing by Python list is supported
+                                    cand_scores = row_scores[non_newborn_cols]
+                                    best_rel = int(torch.argmax(cand_scores).item())
+                                    best_col = non_newborn_cols[best_rel]
+                                    best_conf = float(row_scores[best_col].item())
+                                except Exception:
+                                    continue
+                                # avoid assigning an id_label already taken in this frame
+                                best_label = int(col_map[best_col])
+                                if best_label in id_labels:
+                                    continue
+                                # compute IoU with that column's last-known box
+                                try:
+                                    if self.trajectory_boxes.numel() > 0 and self.trajectory_boxes.shape[1] > best_col:
+                                        cur_box = boxes[r:r+1]
+                                        cur_xyxy = box_cxcywh_to_xyxy(cur_box)
+                                        last_box = self.trajectory_boxes[-1, best_col:best_col+1]
+                                        last_xyxy = box_cxcywh_to_xyxy(last_box)
+                                        iou_mat, _ = box_iou_union(cur_xyxy, last_xyxy)
+                                        iou_val = float(iou_mat[0, 0].item())
+                                    else:
+                                        iou_val = 0.0
+                                except Exception:
+                                    iou_val = 0.0
+                                if best_conf >= self.id_thresh and iou_val >= self.newborn_iou_thresh:
+                                    if os.environ.get("RUNTIME_TRACKER_DEBUG") == "1":
+                                        print(f"[RUNTIME_TRACKER DEBUG] gating override row={r} best_label={best_label} conf={best_conf:.3f} iou={iou_val:.3f}")
+                                    id_labels[r] = best_label
+            except Exception:
+                pass
 
             id_pred_labels = torch.tensor(id_labels, dtype=torch.int64, device=distributed_device())
 
