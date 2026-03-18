@@ -1,6 +1,7 @@
 # Copyright (c) Ruopeng Gao. All Rights Reserved.
 
 import torch
+import os
 import einops
 from scipy.optimize import linear_sum_assignment
 
@@ -142,6 +143,14 @@ class RuntimeTracker:
             "embeddings": output_embeds,
             "id_labels" : id_labels,
         }
+
+        # Optional debug logging (enable with env var RUNTIME_TRACKER_DEBUG=1)
+        if os.environ.get("RUNTIME_TRACKER_DEBUG") == "1":
+            try:
+                tid_head = self.trajectory_id_labels[0].cpu().tolist() if self.trajectory_id_labels.shape[0] > 0 else []
+            except Exception:
+                tid_head = str(self.trajectory_id_labels.shape)
+            print("[RUNTIME_TRACKER DEBUG] id_labels=", id_labels.cpu().tolist(), "ids=", ids_list, "id_label_to_id=", dict(self.id_label_to_id), "traj_head=", tid_head)
 
         # Trajectory & Cleanup
         self._update_trajectory_infos(boxes=boxes, output_embeds=output_embeds, id_labels=id_labels, categories=categories)
