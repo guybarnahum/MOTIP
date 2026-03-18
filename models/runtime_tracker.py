@@ -464,7 +464,17 @@ class RuntimeTracker:
 
         trajectory_id_labels_set = set(self.trajectory_id_labels[0].tolist()) if self.trajectory_id_labels.shape[0] > 0 else set()
         # If id_scores were reduced to tracker columns, use the stored mapping
-        col_map = getattr(self, "_col_id_labels_for_assignment", None)
+        col_map_orig = getattr(self, "_col_id_labels_for_assignment", None)
+        # If we duplicated the newborn column to allow multiple newborn assignments,
+        # we must also extend the column->id_label mapping so indices align with
+        # the expanded `id_scores`. Create a local copy for safe modification.
+        col_map = None
+        if col_map_orig is not None:
+            col_map = list(col_map_orig)
+            # If id_scores was expanded (we added newborn repeats), extend the map
+            if id_scores.shape[1] > len(col_map):
+                extra = id_scores.shape[1] - len(col_map)
+                col_map.extend([self.num_id_vocabulary] * extra)
 
         # Initialize all as newborn (background) then fill by assigned row index
         id_labels = [self.num_id_vocabulary] * num_objs
@@ -478,7 +488,7 @@ class RuntimeTracker:
             pass
         for r, c in zip(match_rows.tolist(), match_cols.tolist()):
             if col_map is not None:
-                # c is a column index into `col_map`
+                # c is a column index into our local `col_map` (already extended if needed)
                 if c < 0 or c >= len(col_map):
                     label = self.num_id_vocabulary
                 else:
