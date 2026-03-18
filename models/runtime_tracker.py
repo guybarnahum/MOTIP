@@ -261,40 +261,74 @@ class RuntimeTracker:
             id_logits = id_logits + mask
             # --------------------------------------------------------
 
-            if not self.use_sigmoid:
-                id_scores = id_logits.softmax(dim=-1)
+            # IMPORTANT: select logits for current tracker columns + newborn first,
+            # then convert to scores. Softmax over the full-vocab produces tiny
+            # per-class probabilities when the vocabulary is large, so reducing
+            # logits before softmax yields meaningful relative confidences for
+            # assignment among the available columns.
+            self._col_id_labels_for_assignment = None
+            logits_reduced = None
+            if self.trajectory_id_labels.shape[0] > 0:
+                try:
+                    col_id_labels = list(self.trajectory_id_labels[0].tolist())
+                    cols = torch.tensor(col_id_labels, dtype=torch.long, device=id_logits.device)
+                    if cols.numel() > 0:
+                        logits_cols = id_logits.index_select(dim=1, index=cols)
+                    else:
+                        logits_cols = id_logits.new_zeros((id_logits.shape[0], 0))
+                    newborn_idx = int(self.num_id_vocabulary)
+                    newborn_logits = id_logits[:, newborn_idx:newborn_idx+1]
+                    logits_reduced = torch.cat((logits_cols, newborn_logits), dim=1)
+                    # store mapping: column_index -> id_label (last entry is newborn sentinel)
+                    self._col_id_labels_for_assignment = col_id_labels + [self.num_id_vocabulary]
+                except Exception:
+                    logits_reduced = None
+
+            # If we have a reduced logits matrix, convert it to scores; otherwise
+            # fall back to computing scores on the full vocabulary as before.
+            if logits_reduced is not None:
+                if not self.use_sigmoid:
+                    id_scores = logits_reduced.softmax(dim=-1)
+                else:
+                    id_scores = logits_reduced.sigmoid()
+                # partition masking already applied to `id_logits` so newborn/person
+                # partitions are respected in `logits_reduced`.
             else:
-                id_scores = id_logits.sigmoid()
+                if not self.use_sigmoid:
+                    id_scores = id_logits.softmax(dim=-1)
+                else:
+                    id_scores = id_logits.sigmoid()
 
             id_scores[is_person ,  self.split_idx:] = 0.0
             id_scores[is_vehicle, :self.split_idx ] = 0.0
 
-            # IMPORTANT: reduce id_scores to the current tracker columns (stable
-            # `trajectory_id_labels`) plus the newborn slot. This makes assignment
-            # outputs refer to tracker column indices (0..num_cols) instead of
-            # global vocabulary indices (0..V-1). We store the mapping in
-            # `self._col_id_labels_for_assignment` for assignment helpers to use.
-            self._col_id_labels_for_assignment = None
-            if self.trajectory_id_labels.shape[0] > 0:
+            # 5. Sanity check + assign id labels:
+            # Debug-only assertion to ensure the column->id_label mapping length
+            # matches the reduced `id_scores` width. In debug mode this will
+            # raise if there's a mismatch and print helpful context.
+            if os.environ.get("RUNTIME_TRACKER_DEBUG") == "1":
+                col_map_dbg = getattr(self, "_col_id_labels_for_assignment", None)
                 try:
-                    col_id_labels = list(self.trajectory_id_labels[0].tolist())
-                    # gather columns for existing labels
-                    cols = torch.tensor(col_id_labels, dtype=torch.long, device=id_scores.device)
-                    if cols.numel() > 0:
-                        id_scores_cols = id_scores.index_select(dim=1, index=cols)
-                    else:
-                        id_scores_cols = id_scores.new_zeros((id_scores.shape[0], 0))
-                    # newborn column is the vocabulary index equal to `num_id_vocabulary`
-                    newborn_idx = int(self.num_id_vocabulary)
-                    newborn_col = id_scores[:, newborn_idx:newborn_idx+1]
-                    id_scores = torch.cat((id_scores_cols, newborn_col), dim=1)
-                    # mapping: column_index -> id_label (last entry is newborn sentinel)
-                    self._col_id_labels_for_assignment = col_id_labels + [self.num_id_vocabulary]
+                    print("[RUNTIME_TRACKER DEBUG] col_map pre-assign=", col_map_dbg)
                 except Exception:
-                    # If any error occurs, fall back to using full-vocab id_scores
-                    self._col_id_labels_for_assignment = None
+                    pass
+                try:
+                    print("[RUNTIME_TRACKER DEBUG] id_scores.shape=", tuple(id_scores.shape))
+                    # print a small sample of scores for quick inspection
+                    r_show = min(3, id_scores.shape[0])
+                    c_show = min(5, id_scores.shape[1])
+                    try:
+                        sample = id_scores[:r_show, :c_show].detach().cpu().tolist()
+                        print("[RUNTIME_TRACKER DEBUG] id_scores_sample=", sample)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                if col_map_dbg is not None:
+                    assert len(col_map_dbg) == id_scores.shape[1], (
+                        f"col_map length {len(col_map_dbg)} != id_scores.shape[1] {id_scores.shape[1]}"
+                    )
 
-            # 5. assign id labels:
             match self.assignment_protocol:
                 case "hungarian": id_labels = self._hungarian_assignment(id_scores=id_scores)
                 case "object-max": id_labels = self._object_max_assignment(id_scores=id_scores)
