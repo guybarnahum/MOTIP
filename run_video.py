@@ -29,6 +29,8 @@ def get_args():
     parser.add_argument('--device', type=str, default="cuda")
     parser.add_argument('--fp16', action='store_true')
     parser.add_argument('--score_thresh', type=float, default=0.5)
+    parser.add_argument('--id_thresh', type=float, default=None, help="ID reuse confidence threshold (optional)")
+    parser.add_argument('--newborn_thresh', type=float, default=None, help="Newborn acceptance score threshold (optional)")
     
     # Frame Range Arguments
     parser.add_argument('--start_frame', type=int, default=0, help="Frame to start processing")
@@ -224,13 +226,19 @@ def main():
 
     cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
     
-    tracker = RuntimeTracker(
+    tracker_kwargs = dict(
         model=model,
         sequence_hw=(H, W),
         miss_tolerance=args.miss_tolerance,
         det_thresh=args.score_thresh,
-        dtype=torch.float16 if args.fp16 else torch.float32
+        dtype=torch.float16 if args.fp16 else torch.float32,
     )
+    if args.id_thresh is not None:
+        tracker_kwargs['id_thresh'] = float(args.id_thresh)
+    if args.newborn_thresh is not None:
+        tracker_kwargs['newborn_thresh'] = float(args.newborn_thresh)
+
+    tracker = RuntimeTracker(**tracker_kwargs)
     tracker.bbox_unnorm = torch.tensor([W, H, W, H], device=device, dtype=tracker.dtype)
 
     temp_out = "temp_" + os.path.basename(args.output_path)

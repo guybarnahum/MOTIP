@@ -6,7 +6,7 @@ import einops
 from scipy.optimize import linear_sum_assignment
 
 from utils.misc import distributed_device
-from utils.box_ops import box_cxcywh_to_xywh
+from utils.box_ops import box_cxcywh_to_xywh, box_cxcywh_to_xyxy, box_iou_union
 from models.misc import get_model
 
 class RuntimeTracker:
@@ -20,8 +20,8 @@ class RuntimeTracker:
             assignment_protocol: str = "hungarian",
             miss_tolerance: int = 30,
             det_thresh: float = 0.5,
-            newborn_thresh: float = 0.5,
-            id_thresh: float = 0.1,
+            newborn_thresh: float = 0.7,
+            id_thresh: float = 0.3,
             area_thresh: int = 0,
             only_detr: bool = False,
             dtype: torch.dtype = torch.float32,
@@ -336,6 +336,46 @@ class RuntimeTracker:
                 case _: raise NotImplementedError
 
             id_pred_labels = torch.tensor(id_labels, dtype=torch.int64, device=distributed_device())
+
+            # Extra diagnostics: for any object assigned as newborn, log per-column
+            # logits (reduced if available, otherwise full logits) and IoU with
+            # existing trajectory boxes to help decide gating/tuning.
+            if os.environ.get("RUNTIME_TRACKER_DEBUG") == "1":
+                try:
+                    for r, lab in enumerate(id_labels):
+                        if lab == self.num_id_vocabulary:
+                            print(f"[RUNTIME_TRACKER DEBUG] newborn diagnostic row={r}")
+                            try:
+                                if logits_reduced is not None:
+                                    row_logits = logits_reduced[r].detach().cpu().tolist()
+                                    topk = sorted(list(enumerate(row_logits)), key=lambda x: -x[1])[:6]
+                                    print("[RUNTIME_TRACKER DEBUG] logits_reduced_row_topk=", topk)
+                                else:
+                                    raw_row = id_logits[r].detach().cpu()
+                                    topk_vals, topk_idx = raw_row.topk(6)
+                                    print("[RUNTIME_TRACKER DEBUG] logits_full_row_topk=", topk_idx.tolist(), [float(v) for v in topk_vals.tolist()])
+                            except Exception:
+                                pass
+                            try:
+                                newborn_logit = float(id_logits[r, int(self.num_id_vocabulary)].item())
+                                print("[RUNTIME_TRACKER DEBUG] newborn_logit=", newborn_logit)
+                            except Exception:
+                                pass
+                            try:
+                                if self.trajectory_boxes.numel() > 0 and self.trajectory_boxes.shape[1] > 0:
+                                    cur_box = boxes[r:r+1]
+                                    cur_xyxy = box_cxcywh_to_xyxy(cur_box)
+                                    last_boxes = self.trajectory_boxes[-1]
+                                    last_xyxy = box_cxcywh_to_xyxy(last_boxes)
+                                    iou_mat, _ = box_iou_union(cur_xyxy, last_xyxy)
+                                    max_iou, argmax = torch.max(iou_mat, dim=1)
+                                    print("[RUNTIME_TRACKER DEBUG] max_iou_vs_tracks=", float(max_iou.item()), "argmax_col=", int(argmax.item()))
+                                else:
+                                    print("[RUNTIME_TRACKER DEBUG] no existing track boxes for IoU")
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
             return id_pred_labels
 
     def _assign_newborn_id_labels(self, pred_id_labels: torch.Tensor, categories: torch.Tensor):
