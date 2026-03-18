@@ -363,13 +363,25 @@ class RuntimeTracker:
         return
 
     def _filter_out_inactive_tracks(self):
+        # Determine which columns have any active (unmasked) entries.
         is_active = torch.sum((~self.trajectory_masks).to(torch.int64), dim=0) > 0
-        self.trajectory_features = self.trajectory_features[:, is_active]
-        self.trajectory_boxes = self.trajectory_boxes[:, is_active]
-        self.trajectory_id_labels = self.trajectory_id_labels[:, is_active]
-        self.trajectory_category_labels = self.trajectory_category_labels[:, is_active]
-        self.trajectory_times = self.trajectory_times[:, is_active]
-        self.trajectory_masks = self.trajectory_masks[:, is_active]
+        # Preserve column ordering and indices: do NOT compact/squeeze columns in-place.
+        # Compaction previously caused column index re-ordering which led to
+        # ID switches when consumers relied on stable column indices.
+        # Instead, keep inactive columns but ensure their feature/box buffers
+        # are cleared and masks set so they can be safely reused later.
+        if self.trajectory_features.numel() == 0:
+            return
+        inactive = (~is_active).to(self.trajectory_masks.device)
+        if inactive.any():
+            # Zero out buffers for inactive columns but KEEP the id label stored
+            # so column <-> id_label mapping remains stable across frames.
+            self.trajectory_features[:, inactive, :] = 0
+            self.trajectory_boxes[:, inactive, :] = 0
+            # keep `trajectory_id_labels` as-is to preserve mapping
+            # keep `trajectory_category_labels` as-is as well
+            self.trajectory_times[:, inactive] = 0
+            self.trajectory_masks[:, inactive] = True
         return
 
     def _hungarian_assignment(self, id_scores: torch.Tensor):
